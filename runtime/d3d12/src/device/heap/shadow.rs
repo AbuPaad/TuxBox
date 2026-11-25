@@ -1,10 +1,12 @@
 //! Anonymous shadow copies when the host rejects section-backed host-memory imports.
 use super::{ImportedHeap, trace_import_failure};
-use crate::commands::page_mapping::{GPU_APERTURE, ImportPin};
+use crate::commands::page_mapping::ImportPin;
 use core::ffi::c_void;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
-use windows::Win32::Foundation::{CloseHandle, E_INVALIDARG, E_OUTOFMEMORY, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    CloseHandle, E_INVALIDARG, E_OUTOFMEMORY, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+};
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_COMMAND_LIST_TYPE_COPY, D3D12_COMMAND_QUEUE_DESC, D3D12_FENCE_FLAG_NONE,
     D3D12_HEAP_FLAG_NONE, D3D12_HEAP_PROPERTIES, D3D12_HEAP_TYPE_READBACK, D3D12_RANGE,
@@ -15,16 +17,16 @@ use windows::Win32::Graphics::Direct3D12::{
     ID3D12Heap, ID3D12Resource,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
-use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEM_COMMIT, MEM_MAPPED, MEM_RELEASE, MEM_RESERVE,
-    MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READWRITE,
-    UnmapViewOfFile, VirtualAlloc, VirtualFree, VirtualQuery,
+    MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_GUARD,
+    PAGE_NOACCESS, PAGE_READWRITE, UnmapViewOfFile, VirtualAlloc, VirtualFree, VirtualQuery,
 };
-use windows::Win32::System::Threading::{CreateEventW, GetCurrentProcess, WaitForSingleObject};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::{Interface, Result};
 
 const MAX_SHADOW_BYTES: usize = 1 << 30;
+const PAGE_STEP: usize = 4096;
 const CHUNK_BYTES: usize = 64;
 
 struct ShadowState {
@@ -40,7 +42,7 @@ pub(super) struct ShadowPages {
     guest_base: u64,
     shadow_base: usize,
     size: usize,
-    pin_key: usize,
+    pin_live: Arc<AtomicBool>,
     state: Mutex<ShadowState>,
 }
 
@@ -64,7 +66,7 @@ impl Drop for ShadowPages {
 }
 
 impl ShadowPages {
-    fn new(guest_base: u64, size: usize, pin_key: usize) -> Result<Arc<Self>> {
+    fn new(guest_base: u64, size: usize, pin_live: Arc<AtomicBool>) -> Result<Arc<Self>> {
         if size == 0 || size > MAX_SHADOW_BYTES {
             return Err(E_INVALIDARG.into());
         }
@@ -72,17 +74,19 @@ impl ShadowPages {
         baseline
             .try_reserve_exact(size)
             .map_err(|_| E_OUTOFMEMORY)?;
-        baseline.resize(size, 0);
         // SAFETY: `None` base asks the OS for an anonymous private region of `size` bytes.
         let shadow_ptr = unsafe { VirtualAlloc(None, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) };
         if shadow_ptr.is_null() {
             return Err(E_OUTOFMEMORY.into());
         }
         let mut guard = AllocGuard(shadow_ptr.addr());
-        if !read_guest_bytes(guest_base, &mut baseline) {
+        if !is_guest_readable(guest_base, size) {
             return Err(E_INVALIDARG.into());
         }
-        // SAFETY: `shadow_ptr` holds `size` writable bytes and `baseline` holds `size` bytes.
+        // SAFETY: `is_guest_readable` confirmed `guest_base..guest_base + size` is committed and
+        // readable, and `shadow_ptr` holds `size` writable bytes.
+        let guest = unsafe { core::slice::from_raw_parts(guest_base as *const u8, size) };
+        baseline.extend_from_slice(guest);
         unsafe { core::ptr::copy_nonoverlapping(baseline.as_ptr(), shadow_ptr.cast(), size) };
         let shadow_base = guard.0;
         guard.0 = 0;
@@ -90,7 +94,7 @@ impl ShadowPages {
             guest_base,
             shadow_base,
             size,
-            pin_key,
+            pin_live,
             state: Mutex::new(ShadowState {
                 baseline,
                 retired: false,
@@ -106,27 +110,25 @@ impl ShadowPages {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).retired
     }
 
-    /// Copy CPU-modified 64-byte chunks into the anonymous shadow buffer.
-    /// Returns `false` once the import pin has been retired by a page remap.
-    fn sync_cpu_writes(&self, scratch: &mut Vec<u8>) -> bool {
+    /// Copy CPU-modified 64-byte chunks into the anonymous shadow buffer using
+    /// a fast 4 KiB page compare first. Returns `false` once retired by a remap.
+    fn sync_cpu_writes(&self) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.retired {
             return false;
         }
-        if !GPU_APERTURE.is_pin_live(self.pin_key) {
+        if !self.pin_live.load(Ordering::Acquire) {
             state.retired = true;
             return false;
         }
-        if scratch.len() < self.size && scratch.try_reserve(self.size - scratch.len()).is_err() {
+        if !is_guest_readable(self.guest_base, self.size) {
             return true;
         }
-        scratch.resize(self.size, 0);
-        if !read_guest_bytes(self.guest_base, &mut scratch[..self.size]) {
-            return true;
-        }
-        // SAFETY: `self.shadow_base` owns `self.size` RW bytes guarded by `self.state`.
+        // SAFETY: `is_guest_readable` checked commit + protection on `guest_base..+size`,
+        // and `shadow_base` owns `size` RW bytes guarded by `self.state`.
+        let guest = unsafe { core::slice::from_raw_parts(self.guest_base as *const u8, self.size) };
         let shadow = unsafe { core::slice::from_raw_parts_mut(self.shadow_base as *mut u8, self.size) };
-        diff_copy_chunks(&scratch[..self.size], &mut state.baseline, shadow);
+        diff_copy_chunks(guest, &mut state.baseline, shadow);
         true
     }
 }
@@ -169,43 +171,59 @@ pub(super) fn contains_mapped_pages(base: u64, size: u64) -> bool {
     saw_mapped
 }
 
-fn read_guest_bytes(address: u64, out: &mut [u8]) -> bool {
-    let process = unsafe { GetCurrentProcess() };
-    let mut done = 0usize;
-    while done < out.len() {
-        let mut read = 0usize;
-        // SAFETY: `ReadProcessMemory` validates guest readability without faulting.
-        let ok = unsafe {
-            ReadProcessMemory(
-                process,
-                address.wrapping_add(done as u64) as _,
-                out[done..].as_mut_ptr().cast(),
-                out.len() - done,
-                Some(&mut read),
-            )
-        }
-        .is_ok();
-        if !ok || read == 0 {
+fn is_guest_readable(address: u64, size: usize) -> bool {
+    let Some(end) = address.checked_add(size as u64) else {
+        return false;
+    };
+    if size == 0 {
+        return true;
+    }
+    let mut cursor = address;
+    while cursor < end {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        // SAFETY: `VirtualQuery` only inspects the process memory map.
+        let queried = unsafe { VirtualQuery(Some(cursor as _), &mut info, size_of_val(&info)) };
+        let protect = info.Protect.0;
+        if queried == 0
+            || info.State != MEM_COMMIT
+            || protect & PAGE_GUARD.0 != 0
+            || protect & 0xff == PAGE_NOACCESS.0
+        {
             return false;
         }
-        done += read;
+        let Some(next) = (info.BaseAddress as u64).checked_add(info.RegionSize as u64) else {
+            return false;
+        };
+        if next <= cursor {
+            return false;
+        }
+        cursor = next;
     }
     true
 }
 
-/// Sync only 64-byte chunks where CPU memory diverged from `baseline`, leaving
-/// any GPU-written chunks in `shadow` untouched.
+/// Skip unchanged 4 KiB pages, then sync only 64-byte chunks where CPU memory
+/// diverged from `baseline`, leaving any GPU-written chunks in `shadow` intact.
 fn diff_copy_chunks(guest: &[u8], baseline: &mut [u8], shadow: &mut [u8]) -> usize {
     let mut copied = 0usize;
-    for ((g, b), s) in guest
-        .chunks(CHUNK_BYTES)
-        .zip(baseline.chunks_mut(CHUNK_BYTES))
-        .zip(shadow.chunks_mut(CHUNK_BYTES))
+    for ((gp, bp), sp) in guest
+        .chunks(PAGE_STEP)
+        .zip(baseline.chunks_mut(PAGE_STEP))
+        .zip(shadow.chunks_mut(PAGE_STEP))
     {
-        if g != &*b {
-            s.copy_from_slice(g);
-            b.copy_from_slice(g);
-            copied += g.len();
+        if gp == &*bp {
+            continue;
+        }
+        for ((g, b), s) in gp
+            .chunks(CHUNK_BYTES)
+            .zip(bp.chunks_mut(CHUNK_BYTES))
+            .zip(sp.chunks_mut(CHUNK_BYTES))
+        {
+            if g != &*b {
+                s.copy_from_slice(g);
+                b.copy_from_slice(g);
+                copied += g.len();
+            }
         }
     }
     copied
@@ -227,43 +245,41 @@ pub(crate) fn sync_shadow_imports() {
     if SHADOW_COUNT.load(Ordering::Acquire) == 0 {
         return;
     }
-    let live: Vec<Arc<ShadowPages>> = {
-        let mut shadows = SHADOWS.lock().unwrap_or_else(|e| e.into_inner());
-        shadows.retain(|weak| weak.strong_count() != 0);
-        let live: Vec<_> = shadows.iter().filter_map(Weak::upgrade).collect();
-        SHADOW_COUNT.store(shadows.len().min(u32::MAX as usize) as u32, Ordering::Release);
-        live
-    };
-    let mut any_retired = false;
-    let sync_list = |scratch: &mut Vec<u8>| -> bool {
-        let mut retired = false;
-        for shadow in live {
-            if !shadow.sync_cpu_writes(scratch) {
-                retired = true;
+    let sync_live = |live: &mut Vec<Arc<ShadowPages>>| {
+        live.clear();
+        {
+            let mut shadows = SHADOWS.lock().unwrap_or_else(|e| e.into_inner());
+            shadows.retain(|weak| weak.strong_count() != 0);
+            live.extend(shadows.iter().filter_map(Weak::upgrade));
+            SHADOW_COUNT.store(shadows.len().min(u32::MAX as usize) as u32, Ordering::Release);
+        }
+        let mut any_retired = false;
+        for shadow in live.iter() {
+            if !shadow.sync_cpu_writes() {
+                any_retired = true;
             }
         }
-        if scratch.capacity() > 4 << 20 {
-            scratch.clear();
-            scratch.shrink_to_fit();
+        live.clear();
+        if live.capacity() > 4096 {
+            live.shrink_to_fit();
         }
-        retired
+        if any_retired {
+            let mut shadows = SHADOWS.lock().unwrap_or_else(|e| e.into_inner());
+            shadows.retain(|weak| weak.upgrade().is_some_and(|s| !s.is_retired()));
+            SHADOW_COUNT.store(shadows.len().min(u32::MAX as usize) as u32, Ordering::Release);
+        }
     };
     std::thread_local! {
-        static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+        static LIVE: std::cell::RefCell<Vec<Arc<ShadowPages>>> = const { std::cell::RefCell::new(Vec::new()) };
     }
-    SCRATCH.with(|cell| {
-        if let Ok(mut scratch) = cell.try_borrow_mut() {
-            any_retired = sync_list(&mut scratch);
+    LIVE.with(|cell| {
+        if let Ok(mut live) = cell.try_borrow_mut() {
+            sync_live(&mut live);
         } else {
-            let mut local = Vec::new();
-            any_retired = sync_list(&mut local);
+            let mut fallback = Vec::new();
+            sync_live(&mut fallback);
         }
     });
-    if any_retired {
-        let mut shadows = SHADOWS.lock().unwrap_or_else(|e| e.into_inner());
-        shadows.retain(|weak| weak.upgrade().is_some_and(|s| !s.is_retired()));
-        SHADOW_COUNT.store(shadows.len().min(u32::MAX as usize) as u32, Ordering::Release);
-    }
 }
 
 pub(super) fn log_shadow_probe_once() {
@@ -333,22 +349,23 @@ pub(super) fn probe_mapped_import(device: &ID3D12Device) -> bool {
         let _ = unsafe { CloseHandle(section) };
         return true;
     }
-    let guard = ProbeSection {
+    let mut guard = Some(ProbeSection {
         section,
         ptr: view.Value.cast(),
-    };
-    // SAFETY: `guard.ptr` points to a valid 64 KiB `PAGE_READWRITE` mapped view.
-    unsafe { guard.ptr.write_volatile(PROBE_SENTINEL) };
+    });
+    let ptr = guard.as_ref().unwrap().ptr;
+    // SAFETY: `ptr` points to a valid 64 KiB `PAGE_READWRITE` mapped view.
+    unsafe { ptr.write_volatile(PROBE_SENTINEL) };
 
     let result: Result<bool> = (|| {
         let heap: ID3D12Heap = if let Ok(sized) = device.cast::<ID3D12Device13>() {
-            match unsafe { sized.OpenExistingHeapFromAddress1(guard.ptr.cast(), PROBE_SIZE) } {
+            match unsafe { sized.OpenExistingHeapFromAddress1(ptr.cast(), PROBE_SIZE) } {
                 Ok(h) => h,
                 Err(_) => return Ok(false),
             }
         } else {
             let host: ID3D12Device3 = device.cast()?;
-            match unsafe { host.OpenExistingHeapFromAddress(guard.ptr.cast()) } {
+            match unsafe { host.OpenExistingHeapFromAddress(ptr.cast()) } {
                 Ok(h) => h,
                 Err(_) => return Ok(false),
             }
@@ -406,21 +423,29 @@ pub(super) fn probe_mapped_import(device: &ID3D12Device) -> bool {
             list.Close()?;
         }
         let cmd: ID3D12CommandList = list.cast()?;
-        unsafe {
-            queue.ExecuteCommandLists(&[Some(cmd)]);
-        }
+        drop(list);
+        // Create fence and event before submission so every post-submit path can wait.
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE)? };
         let event = ProbeEvent(unsafe { CreateEventW(None, false, false, None)? });
         unsafe {
-            queue.Signal(&fence, 1)?;
-            fence.SetEventOnCompletion(1, event.0)?;
-            if WaitForSingleObject(event.0, 5000) != WAIT_OBJECT_0 {
-                return Ok(true);
+            queue.ExecuteCommandLists(&[Some(cmd.clone())]);
+        }
+        let waited = unsafe {
+            queue.Signal(&fence, 1).is_ok()
+                && fence.SetEventOnCompletion(1, event.0).is_ok()
+                && WaitForSingleObject(event.0, 5000) == WAIT_OBJECT_0
+        };
+        let completed = unsafe { fence.GetCompletedValue() };
+        if !waited || completed < 1 {
+            // The GPU copy may still be in flight; keep the probe section and COM objects alive.
+            if let Some(section) = guard.take() {
+                core::mem::forget(section);
             }
-            let completed = fence.GetCompletedValue();
-            if completed < 1 || completed == u64::MAX {
-                return Ok(true);
-            }
+            core::mem::forget((cmd, allocator, queue, fence, event, readback, src, heap));
+            return Ok(true);
+        }
+        if completed == u64::MAX {
+            return Ok(true);
         }
         let range = D3D12_RANGE { Begin: 0, End: 4 };
         let empty = D3D12_RANGE { Begin: 0, End: 0 };
@@ -445,7 +470,7 @@ pub(super) fn open_shadow_sized(
     source: &'static str,
 ) -> Result<Arc<ImportedHeap>> {
     let len = usize::try_from(size).map_err(|_| E_INVALIDARG)?;
-    let shadow = ShadowPages::new(base, len, pin.key())?;
+    let shadow = ShadowPages::new(base, len, pin.live_flag())?;
     let native = unsafe { device.OpenExistingHeapFromAddress1(shadow.ptr(), shadow.size) }.map_err(|e| {
         trace_import_failure(source, "sized-shadow", size, e.code());
         e
@@ -462,7 +487,7 @@ pub(super) fn open_shadow_legacy(
     source: &'static str,
 ) -> Result<Arc<ImportedHeap>> {
     let len = usize::try_from(size).map_err(|_| E_INVALIDARG)?;
-    let shadow = ShadowPages::new(base, len, pin.key())?;
+    let shadow = ShadowPages::new(base, len, pin.live_flag())?;
     let native = unsafe { host.OpenExistingHeapFromAddress(shadow.ptr()) }.map_err(|e| {
         trace_import_failure(source, "legacy-shadow", size, e.code());
         e
