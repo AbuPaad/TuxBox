@@ -90,6 +90,9 @@ pub(super) fn reflected(
                 return Ok(TableLayout::Unsupported);
             };
             corroborated_raster = true;
+            // A static sampler the title compiled into the pixel shader and left out
+            // of this root. The translation reads the root built here, so it finds it.
+            recovered_samplers = tuxbox_dxbc::inline_sampler::omitted(pixel, &signature).unwrap_or_default();
             Some(bindings)
         }
         (Program::Raster { vertex, pixel }, [table, rest @ ..])
@@ -299,6 +302,16 @@ pub(super) fn reflected(
             MinLOD: f32::from_bits(s[8]), MaxLOD: f32::from_bits(s[9]), ShaderRegister: s[10], RegisterSpace: s[11],
             ShaderVisibility: D3D12_SHADER_VISIBILITY(s[12] as i32),
         }).collect();
+        // Recovered samplers join the root's own: `omitted` gives them registers the
+        // root does not use, and the other recoveries apply only to a root with none.
+        let samplers: Vec<_> = if samplers.is_empty() || source.NumStaticSamplers == 0 {
+            samplers
+        } else {
+            if source.pStaticSamplers.is_null() { return Err(E_INVALIDARG.into()); }
+            let mut all = std::slice::from_raw_parts(source.pStaticSamplers, source.NumStaticSamplers as usize).to_vec();
+            all.extend(samplers);
+            all
+        };
         if !samplers.is_empty() {
             desc.Anonymous.Desc_1_1.pStaticSamplers = samplers.as_ptr();
             desc.Anonymous.Desc_1_1.NumStaticSamplers = samplers.len() as u32;
