@@ -41,16 +41,59 @@
         umu-launcher
         bubblewrap
         xvfb-run
+        xwayland
         mangohud
         zenity
       ];
+
+      # The isolated GPU checks start Proton's Wine directly, without umu's runtime
+      fhs = pkgs.buildFHSEnv {
+        name = "tuxbox-fhs";
+        targetPkgs = _: tools ++ [pkgs.stdenv.cc];
+        # Proton's 64-bit and 32-bit Wine
+        multiArch = true;
+        multiPkgs = p:
+          with p; [
+            alsa-lib
+            fontconfig
+            freetype
+            gnutls
+            libGL
+            libpulseaudio
+            libx11
+            libxcb
+            libxcomposite
+            libxcursor
+            libxext
+            libxfixes
+            libxi
+            libxinerama
+            libxkbcommon
+            libxrandr
+            libxrender
+            libxxf86vm
+            lz4
+            systemd
+            vulkan-loader
+            wayland
+            zlib
+          ];
+        profile = ''
+          export VULKAN_HEADERS_INCLUDE=${pkgs.vulkan-headers}/include
+          # The checks mount an empty /tmp, so nix develop's TMPDIR would not exist
+          export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
+          # 32-bit preloads such as Steam's extest fail in 64-bit processes
+          unset LD_PRELOAD
+        '';
+        runScript = "env";
+      };
     in {
       devShells.default = pkgs.mkShell {
-        packages = tools;
+        packages = tools ++ [fhs];
         buildInputs = [pkgs.lz4];
 
-        # Python loads liblz4 through ctypes
-        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.lz4];
+        # Python loads these through ctypes
+        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [pkgs.lz4 pkgs.libx11];
         VULKAN_HEADERS_INCLUDE = "${pkgs.vulkan-headers}/include";
       };
     });
