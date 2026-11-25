@@ -298,7 +298,7 @@ pub(super) fn allocation_info_for(
     unsafe { device.GetResourceAllocationInfo(visible, core::slice::from_ref(desc)) }
 }
 
-/// Requirements of a sampled 2D texture with an undefined layout at 4 KiB alignment.
+/// Requirements of a 2D texture with an undefined layout at 4 KiB alignment.
 ///
 /// XG lays these out as the 4 KiB swizzle. GTA sizes its texture memory and its file
 /// reads with this answer, then creates the texture with that swizzle. A host driver may
@@ -315,7 +315,7 @@ fn small_texture(
     if desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
         || desc.Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN
         || desc.Alignment != small
-        || desc.Flags.0 & !NO_METADATA != 0
+        || desc.Flags.0 & !(NO_METADATA | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0) != 0
     {
         return None;
     }
@@ -401,10 +401,10 @@ unsafe fn info_impl(
                     },
                     Err(_) => invalid,
                 }
-            } else if needs_packed(desc) {
-                allocation_info_for(&device.native, visible, desc)
             } else if let Some(item) = small(desc) {
                 item
+            } else if needs_packed(desc) {
+                allocation_info_for(&device.native, visible, desc)
             } else {
                 let mut item = invalid;
                 unsafe { info(&mut item, device, visible, 1, desc) };
@@ -489,14 +489,16 @@ pub(super) unsafe extern "system" fn info2(
     let mut placements = Vec::new();
     if !details.is_null() && placements.try_reserve_exact(inputs.len()).is_err() { return out; }
     for d in inputs {
+        let guest = D3D12_RESOURCE_DESC {
+            Dimension: d.Dimension, Alignment: d.Alignment, Width: d.Width, Height: d.Height,
+            DepthOrArraySize: d.DepthOrArraySize, MipLevels: d.MipLevels, Format: d.Format,
+            SampleDesc: d.SampleDesc, Layout: d.Layout, Flags: d.Flags,
+        };
         let requirement = if d.Layout.0 >= 0x100 {
-            let desc = D3D12_RESOURCE_DESC {
-                Dimension: d.Dimension, Alignment: d.Alignment, Width: d.Width, Height: d.Height,
-                DepthOrArraySize: d.DepthOrArraySize, MipLevels: d.MipLevels, Format: d.Format,
-                SampleDesc: d.SampleDesc, Layout: d.Layout, Flags: d.Flags,
-            };
             let mut item = invalid;
-            unsafe { info(&mut item, device, visible, 1, &desc) };
+            unsafe { info(&mut item, device, visible, 1, &guest) };
+            item
+        } else if let Some(item) = small_texture(&device.native, visible, &guest) {
             item
         } else if !super::dxgi::supports_native_packed_uav(device, d.Format)
             && let Some(requirement) = packed_requirements(&device.native, visible, d)
@@ -507,11 +509,6 @@ pub(super) unsafe extern "system" fn info2(
             // requirements must be queried with the same flags.
             let mut native = *d;
             native.Flags.0 &= super::format::HOST_FLAGS;
-            let guest = D3D12_RESOURCE_DESC {
-                Dimension: d.Dimension, Alignment: d.Alignment, Width: d.Width, Height: d.Height,
-                DepthOrArraySize: d.DepthOrArraySize, MipLevels: d.MipLevels, Format: d.Format,
-                SampleDesc: d.SampleDesc, Layout: d.Layout, Flags: d.Flags,
-            };
             if let Some(primary) = super::depth::primary(&guest) {
                 native.Format = primary.Format;
                 native.Flags = primary.Flags;
@@ -519,11 +516,6 @@ pub(super) unsafe extern "system" fn info2(
             unsafe { host.GetResourceAllocationInfo2(visible, 1, &native, None) }
         } else { return out };
         if trace::matches(requirement.SizeInBytes) {
-            let guest = D3D12_RESOURCE_DESC {
-                Dimension: d.Dimension, Alignment: d.Alignment, Width: d.Width, Height: d.Height,
-                DepthOrArraySize: d.DepthOrArraySize, MipLevels: d.MipLevels, Format: d.Format,
-                SampleDesc: d.SampleDesc, Layout: d.Layout, Flags: d.Flags,
-            };
             trace::report("info2-item", core::slice::from_ref(&guest), &requirement);
         }
         if requirement.Alignment == 0 || requirement.SizeInBytes == u64::MAX {
