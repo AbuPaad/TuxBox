@@ -246,16 +246,17 @@ impl<'a> Emitter<'a> {
     /// User SGPR of the descriptor table a used-resource location names. A location holds
     /// the root parameter, its first user SGPR and the descriptor's length in dwords, four
     /// for a buffer. The table can be any parameter: RAGE binds its per-draw buffers
-    /// through the second one.
+    /// through the second one. The register has to select that same parameter.
     pub(in crate::hlsl) fn table_sgpr(&self, location: u32) -> Option<u8> {
-        let first = match self.ex.stage {
-            Stage::Compute => 4,
-            Stage::Vertex | Stage::Pixel => 8,
-            _ => return None,
-        };
         let (parameter, sgpr) = (location >> 16, (location >> 8) & 0xff);
-        // Each parameter before it takes at least one user SGPR.
-        (location & 0xff == 4 && sgpr >= first + parameter).then_some(sgpr as u8)
+        let selected = match self.ex.stage {
+            Stage::Compute => sgpr.checked_sub(4),
+            Stage::Pixel => sgpr.checked_sub(8),
+            // A vertex shader's own records name the parameter behind a register.
+            Stage::Vertex => sampler_heap::vertex_table_parameter(self.ex, sgpr as u8).map(|p| p as u32),
+            _ => None,
+        };
+        (location & 0xff == 4 && selected == Some(parameter)).then_some(sgpr as u8)
     }
 
     /// The register and space the shader's own metadata gives a resource bound at `slot`.
