@@ -118,6 +118,12 @@ impl ResourceState {
             None
         }
     }
+    pub(crate) fn guest_address(&self) -> Option<u64> {
+        if let Backing::Addressed(address, _) = &self.backing {
+            return Some(address.base as u64);
+        }
+        self.texture_address.get().map(|address| address.base as u64)
+    }
 }
 impl From<Backing> for ResourceState {
     fn from(backing: Backing) -> Self {
