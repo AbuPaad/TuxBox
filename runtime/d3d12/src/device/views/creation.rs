@@ -205,12 +205,12 @@ pub(in super::super) unsafe extern "system" fn uav(
         };
         return;
     }
+    let packed_view = packed_uav_desc(device, buffer, unsafe { desc.as_ref() });
+    let final_desc = packed_view.as_ref().map_or(desc, core::ptr::from_ref);
     if let Some((mode, offset, stride)) = byte_view {
-        mode.create_uav(device, buffer.expect("placed buffer"), counter, unsafe { *desc }, offset, stride, handle)
+        mode.create_uav(device, buffer.expect("placed buffer"), counter, unsafe { *final_desc }, offset, stride, handle)
             .unwrap_or_else(|e| fail_call(format_args!("placed UAV offset={offset} stride={stride}: {:?}", e.code())));
     } else {
-        let packed_view = packed_uav_desc(device, buffer, unsafe { desc.as_ref() });
-        let final_desc = packed_view.as_ref().map_or(desc, core::ptr::from_ref);
         unsafe { device.native.CreateUnorderedAccessView(buffer, counter, Some(final_desc), handle) };
     }
 }
@@ -229,6 +229,14 @@ fn packed_uav_desc(
     use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
     if let Some(native) = resource {
         let rdesc = unsafe { native.GetDesc() };
+        if rdesc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER {
+            let view = view?;
+            let raw = super::super::allocation::packed_uav_raw_format(view.Format)?;
+            if super::super::dxgi::supports_native_packed_uav(device, view.Format) {
+                return None;
+            }
+            return Some(D3D12_UNORDERED_ACCESS_VIEW_DESC { Format: raw, ..*view });
+        }
         let raw = super::super::allocation::packed_uav_raw_format(rdesc.Format)?;
         if super::super::dxgi::supports_native_packed_uav(device, rdesc.Format) {
             return None;

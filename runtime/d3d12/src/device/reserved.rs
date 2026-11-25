@@ -81,19 +81,18 @@ pub(super) unsafe extern "system" fn create(
     let clear_ptr = host_clear.as_ref().map_or(clear, core::ptr::from_ref);
     let host_initial = host_state(initial, texture);
     let packed = super::allocation::packed_uav_formats(host_desc.Format, host_desc.Flags);
-    let mut enhanced_barriers = false;
     let mut native = None;
     if !packed.is_empty() && !super::dxgi::supports_native_packed_uav(device, host_desc.Format) {
         let Ok(api) = device.native.cast::<ID3D12Device10>() else {
             return E_NOTIMPL;
         };
-        let Some(layout) = super::allocation::initial_barrier_layout(host_initial) else {
-            return E_NOTIMPL;
-        };
+        if !super::allocation::valid_initial_texture_state(host_initial, host_desc.Flags) {
+            return E_INVALIDARG;
+        }
         if let Err(error) = unsafe {
             api.CreateReservedResource2::<_, ID3D12Resource>(
                 &host_desc,
-                layout,
+                D3D12_BARRIER_LAYOUT_COMMON,
                 clear_ptr.as_ref().map(core::ptr::from_ref),
                 None,
                 Some(packed),
@@ -102,7 +101,12 @@ pub(super) unsafe extern "system" fn create(
         } {
             return error.code();
         }
-        enhanced_barriers = layout != D3D12_BARRIER_LAYOUT_COMMON;
+        if let Some(res) = native.as_ref()
+            && let Err(hr) =
+                super::allocation::transition_initial_state(device, res, host_initial, host_desc.Flags)
+        {
+            return hr;
+        }
     } else if let Err(error) = unsafe {
         device.native.CreateReservedResource::<ID3D12Resource>(
             &host_desc,
@@ -119,18 +123,7 @@ pub(super) unsafe extern "system" fn create(
     };
     // The guest description is what views and copies report. The host image
     // is the reserved resource, so it has no heap of its own.
-    unsafe {
-        depth::wrap::<false>(
-            device,
-            &properties,
-            desc,
-            None,
-            initial,
-            native,
-            enhanced_barriers,
-            out,
-        )
-    }
+    unsafe { depth::wrap::<false>(device, &properties, desc, None, initial, native, out) }
 }
 
 fn pageables(

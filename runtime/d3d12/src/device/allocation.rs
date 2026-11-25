@@ -152,6 +152,125 @@ pub(crate) fn initial_barrier_layout(state: D3D12_RESOURCE_STATES) -> Option<D3D
     None
 }
 
+pub(super) fn valid_initial_texture_state(
+    state: D3D12_RESOURCE_STATES,
+    flags: D3D12_RESOURCE_FLAGS,
+) -> bool {
+    if state == D3D12_RESOURCE_STATE_RENDER_TARGET
+        && !flags.contains(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
+    {
+        return false;
+    }
+    initial_barrier_layout(state).is_some()
+}
+
+/// One-shot legacy transition queue used only when a legacy state-based slot
+/// (`CreateCommittedResource`, `CreatePlacedResource`, `CreateReservedResource`)
+/// creates a packed-UAV texture via `Create*Resource3/2(..., COMMON)` with a
+/// non-`COMMON` requested initial state. Keeping the resource on the legacy
+/// state timeline preserves native COPY-queue rules, implicit promotion/decay,
+/// and all legacy barrier types without custom barrier translation.
+pub(super) struct InitTransition {
+    queue: ID3D12CommandQueue,
+    allocator: ID3D12CommandAllocator,
+    list: ID3D12GraphicsCommandList,
+    fence: ID3D12Fence,
+    value: u64,
+}
+
+impl InitTransition {
+    fn new(device: &ID3D12Device) -> windows::core::Result<Self> {
+        let queue_desc = D3D12_COMMAND_QUEUE_DESC {
+            Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+            ..Default::default()
+        };
+        let queue: ID3D12CommandQueue = unsafe { device.CreateCommandQueue(&queue_desc)? };
+        let allocator: ID3D12CommandAllocator =
+            unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)? };
+        let list: ID3D12GraphicsCommandList =
+            unsafe { device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)? };
+        unsafe { list.Close()? };
+        let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE)? };
+        Ok(Self { queue, allocator, list, fence, value: 0 })
+    }
+
+    fn apply(
+        &mut self,
+        resource: &ID3D12Resource,
+        target: D3D12_RESOURCE_STATES,
+    ) -> windows::core::Result<()> {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+        unsafe {
+            self.allocator.Reset()?;
+            self.list.Reset(&self.allocator, None)?;
+        }
+        let mut barrier = D3D12_RESOURCE_BARRIER {
+            Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                Transition: core::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                    pResource: core::mem::ManuallyDrop::new(None),
+                    Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                    StateBefore: D3D12_RESOURCE_STATE_COMMON,
+                    StateAfter: target,
+                }),
+            },
+        };
+        unsafe {
+            core::ptr::from_mut(&mut (*barrier.Anonymous.Transition).pResource)
+                .cast::<*mut core::ffi::c_void>()
+                .write(resource.as_raw());
+            self.list.ResourceBarrier(&[barrier]);
+            self.list.Close()?;
+            let command_list: ID3D12CommandList = self.list.clone().into();
+            self.queue.ExecuteCommandLists(&[Some(command_list)]);
+            self.value += 1;
+            self.queue.Signal(&self.fence, self.value)?;
+            if self.fence.GetCompletedValue() < self.value {
+                let event = CreateEventW(None, false, false, None)?;
+                let set = self.fence.SetEventOnCompletion(self.value, event);
+                if set.is_ok() {
+                    WaitForSingleObject(event, INFINITE);
+                }
+                let _ = CloseHandle(event);
+                set?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn transition_initial_state(
+    device: &Device,
+    resource: &ID3D12Resource,
+    target: D3D12_RESOURCE_STATES,
+    flags: D3D12_RESOURCE_FLAGS,
+) -> Result<(), windows::core::HRESULT> {
+    if target == D3D12_RESOURCE_STATE_COMMON
+        || flags.contains(D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)
+    {
+        return Ok(());
+    }
+    let mut slot = device
+        .state
+        .init_transition
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let runner = match slot.as_mut() {
+        Some(runner) => runner,
+        None => match InitTransition::new(&device.native) {
+            Ok(runner) => slot.insert(runner),
+            Err(error) => return Err(error.code()),
+        },
+    };
+    if let Err(error) = runner.apply(resource, target) {
+        *slot = None;
+        return Err(error.code());
+    }
+    Ok(())
+}
+
 pub(super) fn packed_requirements(
     device: &ID3D12Device, visible: u32, desc: &D3D12_RESOURCE_DESC1,
 ) -> Option<D3D12_RESOURCE_ALLOCATION_INFO> {
@@ -230,8 +349,11 @@ unsafe fn info_impl(
         return out;
     }
     let descs = unsafe { slice::from_raw_parts(descs, count as usize) };
-    if descs.iter().any(|d| super::placement::console_layout(d.Layout.0)
-        || !packed_uav_formats(d.Format, d.Flags).is_empty()) {
+    let needs_packed = |d: &D3D12_RESOURCE_DESC| {
+        !packed_uav_formats(d.Format, d.Flags).is_empty()
+            && !super::dxgi::supports_native_packed_uav(device, d.Format)
+    };
+    if descs.iter().any(|d| super::placement::console_layout(d.Layout.0) || needs_packed(d)) {
         // The guest will allocate these bytes itself and pass the address to
         // CreatePlacedResourceX. Account for the Xbox planes and batch padding.
         let mut bytes = 0u64;
@@ -248,7 +370,7 @@ unsafe fn info_impl(
                     },
                     Err(_) => invalid,
                 }
-            } else if !packed_uav_formats(desc.Format, desc.Flags).is_empty() {
+            } else if needs_packed(desc) {
                 allocation_info_for(&device.native, visible, desc)
             } else {
                 let mut item = invalid;
@@ -343,7 +465,9 @@ pub(super) unsafe extern "system" fn info2(
             let mut item = invalid;
             unsafe { info(&mut item, device, visible, 1, &desc) };
             item
-        } else if let Some(requirement) = packed_requirements(&device.native, visible, d) {
+        } else if !super::dxgi::supports_native_packed_uav(device, d.Format)
+            && let Some(requirement) = packed_requirements(&device.native, visible, d)
+        {
             requirement
         } else if let Ok(host) = device.native.cast::<ID3D12Device8>() {
             // Image creation keeps only the desktop bits, DCC included, so the
@@ -405,7 +529,13 @@ pub(super) unsafe extern "system" fn footprints(
     total: *mut u64,
 ) {
     const _: () = assert!(size_of::<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>() == 32);
-    let native = unsafe { desc.as_ref() }.and_then(copy_footprint_desc);
+    let native = unsafe { desc.as_ref() }.and_then(|d| {
+        if super::dxgi::supports_native_packed_uav(device, d.Format) {
+            host_description(d)
+        } else {
+            copy_footprint_desc(d)
+        }
+    });
     let desc = native.as_ref().map_or(desc, core::ptr::from_ref);
     // All four output arrays are optional. Their storage is owned by the guest.
     unsafe {

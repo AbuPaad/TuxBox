@@ -277,22 +277,21 @@ pub(super) unsafe extern "system" fn place(
     let clear_ptr = host_clear.as_ref().map_or(clear, core::ptr::from_ref);
     let host_initial = super::host_state(initial, desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER);
     let packed = super::allocation::packed_uav_formats(host.Format, host.Flags);
-    let mut enhanced_barriers = false;
     let mut native = None;
     if !packed.is_empty() && !super::dxgi::supports_native_packed_uav(device, host.Format) {
         let Ok(api) = device.native.cast::<ID3D12Device10>() else {
             return report("host", E_NOTIMPL);
         };
-        let Some(layout) = super::allocation::initial_barrier_layout(host_initial) else {
-            return report("host", E_NOTIMPL);
-        };
+        if !super::allocation::valid_initial_texture_state(host_initial, host.Flags) {
+            return report("host", E_INVALIDARG);
+        }
         let host1 = super::allocation::resource_desc1(&host);
         if let Err(error) = unsafe {
             api.CreatePlacedResource2::<_, ID3D12Resource>(
                 &heap.native,
                 offset,
                 &host1,
-                layout,
+                D3D12_BARRIER_LAYOUT_COMMON,
                 clear_ptr.as_ref().map(core::ptr::from_ref),
                 Some(packed),
                 &mut native,
@@ -300,7 +299,12 @@ pub(super) unsafe extern "system" fn place(
         } {
             return report("host", error.code());
         }
-        enhanced_barriers = layout != D3D12_BARRIER_LAYOUT_COMMON;
+        if let Some(res) = native.as_ref()
+            && let Err(hr) =
+                super::allocation::transition_initial_state(device, res, host_initial, host.Flags)
+        {
+            return report("host", hr);
+        }
     } else if let Err(error) = unsafe {
         device.native.CreatePlacedResource::<_, ID3D12Resource>(
             &heap.native,
@@ -321,7 +325,6 @@ pub(super) unsafe extern "system" fn place(
             primary.as_ref(),
             initial,
             native,
-            enhanced_barriers,
             out,
         )
     }
@@ -440,9 +443,15 @@ unsafe fn place_gpu_target(
     let mut render_heap = None;
     let result = (|| -> windows::core::Result<ID3D12Resource> {
         let api: ID3D12Device13 = device.native.cast()?;
-        let formats = super::allocation::packed_uav_formats(host.Format, host.Flags);
+        let formats = if super::dxgi::supports_native_packed_uav(device, host.Format) {
+            &[][..]
+        } else {
+            super::allocation::packed_uav_formats(host.Format, host.Flags)
+        };
         let requirements = |desc: &D3D12_RESOURCE_DESC1| {
-            super::allocation::packed_requirements(&device.native, 0, desc)
+            (!formats.is_empty())
+                .then(|| super::allocation::packed_requirements(&device.native, 0, desc))
+                .flatten()
                 .unwrap_or_else(|| unsafe { api.GetResourceAllocationInfo2(0, 1, desc, None) })
         };
         let mut allocation = requirements(&host);
@@ -543,15 +552,13 @@ pub(super) unsafe extern "system" fn committed_layout(
     if !protected.is_null() { return E_NOTIMPL; }
     if count > 0 && formats.is_null() { return E_INVALIDARG; }
     let packed = super::allocation::packed_uav_formats(desc.Format, desc.Flags);
+    let needs_cast = !packed.is_empty() && !super::dxgi::supports_native_packed_uav(device, desc.Format);
     let mut merged_castable = Vec::new();
     let castable = if count == 0 {
-        (!packed.is_empty()).then_some(packed)
+        needs_cast.then_some(packed)
     } else {
         let caller = unsafe { std::slice::from_raw_parts(formats, count as usize) };
-        if !packed.is_empty()
-            && !super::dxgi::supports_native_packed_uav(device, desc.Format)
-            && packed.iter().any(|fmt| !caller.contains(fmt))
-        {
+        if needs_cast && packed.iter().any(|fmt| !caller.contains(fmt)) {
             merged_castable.extend_from_slice(caller);
             for &fmt in packed {
                 if !merged_castable.contains(&fmt) {

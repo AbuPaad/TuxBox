@@ -1,3 +1,6 @@
+#[path = "allocation_regressions.rs"]
+mod regressions;
+
 use super::{
     copy_footprint_desc, initial_barrier_layout, packed_uav_formats, packed_uav_raw_format,
     supports_typed_uav,

@@ -349,6 +349,11 @@ pub(in super::super) unsafe extern "system" fn address_uav(
         fail_call(format_args!("address UAV at {:#x} starts {offset} bytes into its buffer, not a whole {stride}-byte element", desc.address));
     }
     view.Anonymous.Buffer.FirstElement = buffer.FirstElement + offset / u64::from(stride);
+    if let Some(raw) = super::super::allocation::packed_uav_raw_format(view.Format)
+        && !super::super::dxgi::supports_native_packed_uav(device, view.Format)
+    {
+        view.Format = raw;
+    }
     crate::diagnostics::display::texture_view(handle.ptr, None, None);
     device.state.imported_views.store(handle.ptr, Some(DescriptorBacking::Registered { _address: entry.clone() }));
     device.state.blas.views.store(handle.ptr, None);

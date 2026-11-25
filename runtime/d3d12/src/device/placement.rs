@@ -268,7 +268,9 @@ impl Texture {
             } else {
                 (0, 0, 2, luma_bytes..size)
             };
-            let footprint_host = super::allocation::copy_footprint_desc(&host);
+            let footprint_host = super::allocation::needs_packed_uav_cast(device, host.Format, host.Flags)
+                .then(|| super::allocation::copy_footprint_desc(&host))
+                .flatten();
             let footprint_desc = footprint_host.as_ref().unwrap_or(&host);
             let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
             let (mut rows, mut row_bytes, mut bytes) = (0, 0, 0);

@@ -204,7 +204,9 @@ fn regions_for(
     resource: &ID3D12Resource,
 ) -> Result<(u64, Vec<Region>, Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>)> {
     let desc = unsafe { resource.GetDesc() };
-    let footprint_desc = crate::device::allocation::copy_footprint_desc(&desc);
+    let footprint_desc = (!crate::device::allocation::supports_typed_uav(device, desc.Format))
+        .then(|| crate::device::allocation::copy_footprint_desc(&desc))
+        .flatten();
     let desc_for_footprints = footprint_desc.as_ref().unwrap_or(&desc);
     let count = subresource_count(device, desc_for_footprints).ok_or(E_INVALIDARG)?;
     let mut layouts = vec![D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); count as usize];
