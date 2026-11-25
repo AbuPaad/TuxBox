@@ -109,3 +109,48 @@ fn vertex_and_mesh_views_keep_the_complete_record() {
         assert_eq!(stride_words(&table, &resource, other, 3, false), None);
     }
 }
+
+/// A root whose third table holds one structured buffer, and a program that loads its
+/// descriptor through that table's pointer and reads the record's first word.
+fn third_table(stage: Stage, location: u32) -> ShaderExtract {
+    use crate::meta::{RootParam, RootParamKind, RootRange};
+    let pointer = if stage == Stage::Compute { 6 } else { 10 };
+    let words = [
+        0xf408_0400 | pointer / 2, 0xfa00_0000, // s_load_dwordx4 s[16:19], s[pointer:pointer+1], 0
+        0xe030_2000, 0x8004_0400, // buffer_load_dword v4, v0, s[16:19], 0 idxen
+        0xbf81_0000, // s_endpgm
+    ];
+    let isa: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+    let mut ex = crate::hlsl::mesh::heap_extract(&[], 0, &isa);
+    ex.stage = stage;
+    ex.psv_threads = (stage == Stage::Compute).then_some([64, 1, 1]);
+    ex.required_features = None;
+    ex.fssm = fixture(&[[0x300, 0, 128, 136, location]]);
+    ex.resources.push(PsvResource { res_type: 5, space: 1, lower: 128, upper: 128 });
+    let root = ex.root_sig.as_mut().unwrap();
+    root.version = 2;
+    root.params = [(0, 0), (64, 0), (128, 1)]
+        .map(|(base_register, space)| RootParam {
+            visibility: 0,
+            kind: RootParamKind::Table(vec![RootRange { range_type: 0, num: 1, base_register, space, offset_in_table: 0 }]),
+        })
+        .into();
+    ex
+}
+
+#[test]
+fn a_record_behind_any_table_keeps_its_stride() {
+    for (stage, location) in [(Stage::Compute, 0x20604), (Stage::Pixel, 0x20a04)] {
+        let element = |location| {
+            let hlsl = crate::hlsl::translate(&third_table(stage, location)).unwrap().hlsl;
+            let start = hlsl.find("struct TbElem_sbuf128").unwrap();
+            hlsl[start..].lines().next().unwrap().to_owned()
+        };
+        assert_eq!(element(location), "struct TbElem_sbuf128 { uint w[34]; };");
+        // An image descriptor, another table's pointer, and a parameter too far along
+        // for its pointer do not describe this buffer. The guess is the one word read.
+        for other in [location + 4, location - 0x100, location + 0x10000] {
+            assert_eq!(element(other), "struct TbElem_sbuf128 { uint w[1]; };", "{other:#x}");
+        }
+    }
+}
