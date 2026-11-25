@@ -346,9 +346,7 @@ void xbox_shader_scenario(ID3D12Device* device) {
     expect_value(memory, 0, 3, "write after the dispatch");
 }
 
-// ExecuteIndirect on its Series X|S slot runs the course shader from an
-// argument buffer, and matches the same course dispatched directly.
-void indirect_dispatch(ID3D12Device* device) {
+ComPtr<ID3D12PipelineState> course_pipeline(ID3D12Device* device, ComPtr<ID3D12RootSignature>& root) {
     D3D12_ROOT_PARAMETER params[2]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants = {1, 2, 2};
@@ -360,7 +358,6 @@ void indirect_dispatch(ID3D12Device* device) {
     ComPtr<ID3DBlob> serialized;
     check(D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, nullptr),
           "serialize course root signature");
-    ComPtr<ID3D12RootSignature> root;
     check(device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
                                       IID_PPV_ARGS(&root)), "create course root signature");
     D3D12_COMPUTE_PIPELINE_STATE_DESC shader{};
@@ -370,6 +367,114 @@ void indirect_dispatch(ID3D12Device* device) {
     check(method<CreateComputePipeline>(device, device_create_compute)(device, &shader, 0, nullptr,
                                                                        IID_PPV_ARGS(&pipeline)),
           "create course pipeline");
+    return pipeline;
+}
+
+void dispatch_wait(ID3D12Device* device) {
+    constexpr size_t label = 0, payload = 65536, copied = 2 * 65536;
+    constexpr UINT64 expected = 0x12345678;
+    ComPtr<ID3D12RootSignature> root;
+    auto pipeline = course_pipeline(device, root);
+
+    for (bool after_dispatch : {false, true}) {
+        Memory memory(3 * 65536);
+        std::memset(memory.base + copied, 0xcc, sizeof(expected));
+        auto output = buffer(device, D3D12_HEAP_TYPE_DEFAULT, sizeof(UINT), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        auto proof = buffer(device, D3D12_HEAP_TYPE_READBACK, sizeof(UINT), D3D12_RESOURCE_STATE_COPY_DEST);
+        Queue direct(device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+        Queue compute(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+        auto* list = compute.list.Get();
+        direct.write64(memory.address(payload), expected);
+        direct.write64(memory.address(label), 1);
+        if (!after_dispatch) compute.wait64(memory.address(label), 1);
+        auto bind_course = [&] {
+            const UINT constants[] = {0x5194c0d1u, 1};
+            method<SetRoot>(list, slot_compute_root)(list, root.Get());
+            list->SetPipelineState(pipeline.Get());
+            method<SetConstants>(list, slot_root_constants)(list, 0, 2, constants, 0);
+            method<SetUav>(list, slot_root_uav)(list, 1, output->GetGPUVirtualAddress());
+        };
+        bind_course();
+        list->Dispatch(1, 1, 1);
+        if (after_dispatch) compute.wait64(memory.address(label), 1);
+        method<CopyMemory_>(list, slot_copy_memory)(
+            list, memory.address(copied), memory.address(payload), sizeof(expected), 0);
+        compute_fixture::transition(list, output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list->CopyBufferRegion(proof.Get(), 0, output.Get(), 0, sizeof(UINT));
+        compute.submit();
+
+        // Keep the producer unsubmitted throughout the observation window.
+        const auto deadline = GetTickCount64() + 250;
+        while (compute.fence->GetCompletedValue() < compute.submitted && GetTickCount64() < deadline)
+            Sleep(1);
+        const auto observed = compute.fence->GetCompletedValue();
+        direct.submit();
+        direct.finish("dispatch-wait producer");
+        compute.finish("dispatch-wait consumer");
+        if (observed == UINT64_MAX) throw std::runtime_error("device removed during dispatch-wait");
+        expect_value(memory, label, 1, "producer label");
+        expect_value(memory, payload, expected, "producer payload");
+        D3D12_RANGE range{0, sizeof(UINT)}, empty{};
+        void* mapped{};
+        check(proof->Map(0, &range, &mapped), "map dispatch proof");
+        const UINT row = *static_cast<const UINT*>(mapped);
+        proof->Unmap(0, &empty);
+        if (row != 1) throw std::runtime_error("course dispatch did not produce the expected first row");
+        const bool early = observed >= compute.submitted;
+        const UINT64 value = memory.read64(copied);
+        char result[144];
+        std::snprintf(result, sizeof(result), "wait=%s completed_before_producer=%s cpu=0x%08llx course=0x%x",
+                      after_dispatch ? "after-dispatch" : "list-start", early ? "yes" : "no",
+                      static_cast<unsigned long long>(value), row);
+        std::fprintf(stderr, "%s\n", result);
+        if (early || value != expected) throw std::runtime_error(result);
+        if (!after_dispatch) continue;
+
+        // Reuse the guest list. Each prefix must reach its marker before the
+        // producer releases that wait, and compute bindings must survive both.
+        constexpr size_t progress = 8;
+        compute.reopen();
+        compute_fixture::transition(list, output.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        bind_course();
+        list->Dispatch(1, 1, 1);
+        for (UINT stage : {1u, 2u}) {
+            compute.write64(memory.address(progress), stage);
+            compute.wait64(memory.address(label), stage + 1);
+        }
+        const UINT seed = 2;
+        method<SetConstants>(list, slot_root_constants)(list, 0, 1, &seed, 0);
+        list->Dispatch(1, 1, 1);
+        compute_fixture::transition(list, output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list->CopyBufferRegion(proof.Get(), 0, output.Get(), 0, sizeof(UINT));
+        compute.submit();
+        bool prefixes_in_order = true;
+        for (UINT stage : {1u, 2u}) {
+            const auto until = GetTickCount64() + deadline_ms;
+            while (memory.read64(progress) < stage && GetTickCount64() < until) Sleep(1);
+            prefixes_in_order &= memory.read64(progress) == stage && compute.fence->GetCompletedValue() < compute.submitted;
+            direct.reopen();
+            direct.write64(memory.address(label), stage + 1);
+            direct.submit();
+            direct.finish("release dispatch-wait stage");
+        }
+        compute.finish("resumed dispatch after two waits");
+        if (!prefixes_in_order) throw std::runtime_error("compute prefixes did not reach their waits in order");
+        check(proof->Map(0, &range, &mapped), "map resumed dispatch proof");
+        const UINT resumed = *static_cast<const UINT*>(mapped);
+        proof->Unmap(0, &empty);
+        if ((resumed & 255) != seed) throw std::runtime_error("compute bindings lost across waits");
+    }
+}
+
+// ExecuteIndirect on its Series X|S slot runs the course shader from an
+// argument buffer, and matches the same course dispatched directly.
+void indirect_dispatch(ID3D12Device* device) {
+    ComPtr<ID3D12RootSignature> root;
+    auto pipeline = course_pipeline(device, root);
 
     D3D12_INDIRECT_ARGUMENT_DESC argument{};
     argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
@@ -1191,6 +1296,7 @@ constexpr Scenario scenarios[] = {
     {L"copy-memory", copy_memory},
     {L"shared-texture", shared_texture},
     {L"indirect-dispatch", indirect_dispatch},
+    {L"dispatch-wait", dispatch_wait},
     {L"texture-readback", texture_readback},
     {L"ray-tracing-builder", ray_tracing_builder},
     {L"thread-dimensions", thread_dimensions},
@@ -1244,7 +1350,7 @@ std::string narrow(const wchar_t* text) {
 
 const wchar_t* const selftest_scenarios[] = {L"labels",            L"cross-queue",      L"compute-frame",
                                              L"skipped-command",   L"copy-memory",      L"shared-texture",
-                                             L"indirect-dispatch", L"texture-readback", L"ray-tracing-builder",
+                                             L"indirect-dispatch", L"dispatch-wait", L"texture-readback", L"ray-tracing-builder",
                                              L"thread-dimensions", L"descriptor-reclaim",
                                              L"xbox-shader"};
 const unsigned selftest_scenario_count = static_cast<unsigned>(std::size(selftest_scenarios));
