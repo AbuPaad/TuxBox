@@ -33,9 +33,20 @@ pub(in super::super) struct PagePools {
     // 1.2 MiB about five times a frame each, and its recording allocators
     // keep every import for 216 frames: about 4,500 live buffers.
     pub(super) loose: std::sync::Mutex<PageCache<ImportedHeap>>,
+    mapped_import_supported: std::sync::OnceLock<bool>,
 }
 
 impl PagePools {
+    pub(super) fn supports_mapped_import(&self, device: &ID3D12Device) -> bool {
+        *self.mapped_import_supported.get_or_init(|| {
+            let ok = super::shadow::probe_mapped_import(device);
+            if !ok {
+                super::shadow::log_shadow_probe_once();
+            }
+            ok
+        })
+    }
+
     pub(super) fn register(&self, start: u64, end: u64) -> usize {
         let pool = Box::new(PagePool { start, end, pages: PageCache::default() });
         let token = core::ptr::from_ref(pool.as_ref()).addr();
@@ -43,13 +54,15 @@ impl PagePools {
         token
     }
 
-    pub(super) fn import(&self, device: &ID3D12Device13, base: u64, size: u64, pin: ImportPin, source: &'static str) -> windows::core::Result<Arc<ImportedHeap>> {
+    pub(super) fn import(&self, host: &ID3D12Device, device: &ID3D12Device13, base: u64, size: u64, pin: ImportPin, source: &'static str) -> windows::core::Result<Arc<ImportedHeap>> {
         let open = || -> windows::core::Result<Arc<ImportedHeap>> {
-            let native = unsafe { device.OpenExistingHeapFromAddress1(base as _, size as usize) }.map_err(|error| {
-                trace_import_failure(source, "sized", size, error.code());
-                error
-            })?;
-            Ok(Arc::new(ImportedHeap { native, _pin: pin }))
+            if super::shadow::contains_mapped_pages(base, size) && !self.supports_mapped_import(host) {
+                return super::shadow::open_shadow_sized(device, base, size, pin, source);
+            }
+            match unsafe { device.OpenExistingHeapFromAddress1(base as _, size as usize) } {
+                Ok(native) => Ok(Arc::new(ImportedHeap::direct(native, pin))),
+                Err(error) => super::shadow::try_open_sized(device, base, size, pin, source, error),
+            }
         };
         if size == u64::from(D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) {
             use std::sync::atomic::AtomicU64;

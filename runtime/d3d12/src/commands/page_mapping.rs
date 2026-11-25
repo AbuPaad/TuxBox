@@ -236,15 +236,14 @@ pub(crate) struct ImportPin {
     key: usize,
 }
 impl ImportPin {
+    pub(crate) fn key(&self) -> usize {
+        self.key
+    }
+
     /// False once a page remap has replaced the pages this import was created
     /// from. A retired import must not be reused for the address.
     pub(crate) fn is_live(&self) -> bool {
-        GPU_APERTURE
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .imports
-            .contains_key(&self.key)
+        GPU_APERTURE.is_pin_live(self.key)
     }
 }
 impl Drop for ImportPin {
@@ -310,6 +309,23 @@ impl Registry {
         state.pending.retain(|p| p.strong_count() != 0);
         state.pending.push(Arc::downgrade(mapping));
     }
+    pub(crate) fn is_pin_live(&self, key: usize) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .imports
+            .contains_key(&key)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retire_pin_for_test(&self, key: usize) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .imports
+            .remove(&key);
+    }
+
     fn apply(&self, mappings: &Mappings) -> Result<()> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         mappings.apply(&mut state.imports)
