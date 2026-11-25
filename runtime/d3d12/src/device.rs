@@ -30,7 +30,7 @@ use windows::core::{GUID, HRESULT, IUnknown, Interface, InterfaceRef, Result};
 use crate::commands::{wrap_command_list, wrap_command_queue};
 use crate::proxy::{Proxy, Slot, Slots, allocate, check_output, child_slots, object_slots, unwrap};
 
-mod allocation;
+pub(crate) mod allocation;
 mod fallback;
 pub(crate) mod blas;
 pub(crate) mod compute;
