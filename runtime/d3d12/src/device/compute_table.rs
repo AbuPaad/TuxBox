@@ -16,6 +16,9 @@ pub(crate) struct ComputeTable {
     /// LOCAL: appended host parameters that bind the same guest table
     /// (host index, guest slot), e.g. a pixel-only copy of a mesh-rewritten table.
     pub(crate) mirrors: Vec<(u32, u32)>,
+    /// The root a mesh pipeline's pixel program is translated against when
+    /// that program reads a table at other slots than the title declares.
+    pub(crate) pixel_root: Option<RootSource>,
 }
 
 #[derive(Clone, Copy)]
@@ -318,6 +321,7 @@ pub(super) fn reflected(
             accessed_views,
             index_map,
             mirrors: Vec::new(),
+            pixel_root: None,
         })))
     }
 }
@@ -419,6 +423,7 @@ fn append_corroborated_ranges(
             accessed_views,
             index_map: None,
             mirrors: Vec::new(),
+            pixel_root: None,
         })))
     }
 }
