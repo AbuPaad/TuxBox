@@ -340,7 +340,6 @@ fn texture_layout(
 }
 
 fn record_copy(
-    list: &super::NativeList,
     state: &mut super::Recording,
     device: &ID3D12Device,
     destination: LinearResource,
@@ -348,7 +347,7 @@ fn record_copy(
     bytes: u64,
 ) -> Result<()> {
     use LinearResource::{Buffer, Texture};
-    let native = &list.native;
+    let native = state.native().clone();
     match (destination, source) {
         (Buffer { resource: to, offset: to_offset }, Buffer { resource: from, offset: from_offset }) => {
             super::raytracing::retain(state, &[&to, &from])?;
@@ -357,7 +356,7 @@ fn record_copy(
                 let staging = staging_buffer(device, bytes)?;
                 super::raytracing::retain(state, &[&staging])?;
                 unsafe { native.CopyBufferRegion(&staging, 0, &from, from_offset, bytes) };
-                staging_becomes_source(native, &staging);
+                staging_becomes_source(&native, &staging);
                 unsafe { native.CopyBufferRegion(&to, to_offset, &staging, 0, bytes) };
             } else {
                 // SAFETY: both buffers belong to this open list and contain the range.
@@ -374,9 +373,9 @@ fn record_copy(
             let staging = staging_buffer(device, size)?;
             super::raytracing::retain(state, &[&to, &from, &staging])?;
             for (index, layout) in footprints {
-                record_texture(native, &from, &staging, index, layout, Direction::FromTexture);
+                record_texture(&native, &from, &staging, index, layout, Direction::FromTexture);
             }
-            staging_becomes_source(native, &staging);
+            staging_becomes_source(&native, &staging);
             // SAFETY: `used` fits both the staging buffer and the guest range.
             unsafe { native.CopyBufferRegion(&to, to_offset, &staging, 0, used) };
         }
@@ -389,9 +388,9 @@ fn record_copy(
             super::raytracing::retain(state, &[&to, &from, &staging])?;
             // SAFETY: `used` fits both the staging buffer and the guest range.
             unsafe { native.CopyBufferRegion(&staging, 0, &from, from_offset, used) };
-            staging_becomes_source(native, &staging);
+            staging_becomes_source(&native, &staging);
             for (index, layout) in footprints {
-                record_texture(native, &to, &staging, index, layout, Direction::IntoTexture);
+                record_texture(&native, &to, &staging, index, layout, Direction::IntoTexture);
             }
         }
         (Texture { .. }, Texture { .. }) => {
@@ -411,8 +410,8 @@ pub(super) unsafe extern "system" fn copy_memory(
     bytes: u64,
     flags: u32,
 ) {
-    let super::CommandRecording { list, state } = &mut *recording(list);
-    if !state.can_record(&list.native) {
+    let mut state = recording(list);
+    if !state.prepare_state() {
         return;
     }
     // The console flags decompress or reinterpret surfaces during the copy.
@@ -426,6 +425,7 @@ pub(super) unsafe extern "system" fn copy_memory(
     if bytes == 0 {
         return;
     }
+    state.active.has_commands = true;
     let result = (|| -> Result<()> {
         super::memory_wait::trace_write("CopyMemoryToMemoryX", destination, bytes, 0);
         let owner = parent(&list.parent);
@@ -437,8 +437,9 @@ pub(super) unsafe extern "system" fn copy_memory(
         };
         let (to_kind, from_kind) = (kind(&to), kind(&from));
         let mut native_device: Option<ID3D12Device> = None;
-        unsafe { list.native.GetDevice(&mut native_device)? };
-        record_copy(list, state, &native_device.ok_or(E_FAIL)?, to, from, bytes)?;
+        unsafe { state.native().GetDevice(&mut native_device)? };
+        record_copy(&mut state, &native_device.ok_or(E_FAIL)?, to, from, bytes)?;
+        state.record_write(destination, bytes);
         note(&format!(
             "slot 62 copied {bytes:#x} bytes from {from_kind} {source:#x} to {to_kind} {destination:#x}"
         ));
