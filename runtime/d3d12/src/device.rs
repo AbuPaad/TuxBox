@@ -329,8 +329,21 @@ unsafe extern "system" fn create_allocator(
     }
 }
 
+fn guest_increment_size(this: &Device, kind: D3D12_DESCRIPTOR_HEAP_TYPE) -> u32 {
+    let native = unsafe { this.native.GetDescriptorHandleIncrementSize(kind) };
+    if this.state.device11_queue
+        && kind == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV
+        && (native as usize) >= descriptor_paging::INLINE_BYTES
+        && (native as usize).is_multiple_of(descriptor_paging::INLINE_BYTES)
+    {
+        descriptor_paging::INLINE_BYTES as u32
+    } else {
+        native
+    }
+}
+
 unsafe extern "system" fn increment_size(this: &Device, kind: D3D12_DESCRIPTOR_HEAP_TYPE) -> u32 {
-    unsafe { this.native.GetDescriptorHandleIncrementSize(kind) }
+    guest_increment_size(this, kind)
 }
 
 pub(crate) const BUFFER_READ_BITS: i32 =
