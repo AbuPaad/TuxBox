@@ -26,12 +26,13 @@ impl ResourceHeap {
     pub(super) fn scalar_descriptor(
         &self, index: u32, arena: Option<&device::descriptor_paging::Arena>,
     ) -> Option<ScalarDescriptor> {
-        let offset = (index as usize).checked_mul(self.stride)?;
         let cpu = if let Some(arena) = arena {
+            let offset = (index as usize).checked_mul(arena.guest_stride())?;
             let logical = arena.base().checked_add(offset)?;
             if !arena.contains(logical as u64) { return None; }
             arena.cpu(logical).ptr
         } else {
+            let offset = (index as usize).checked_mul(self.stride)?;
             let handle = self.cpu.start.checked_add(offset)?;
             if !self.cpu.contains(&handle) { return None; }
             handle
