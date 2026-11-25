@@ -137,6 +137,7 @@ pub(super) unsafe fn wrap<const CONSOLE_LAYOUT: bool>(
     primary: Option<&D3D12_RESOURCE_DESC>,
     initial: D3D12_RESOURCE_STATES,
     native: Option<ID3D12Resource>,
+    enhanced_barriers: bool,
     out: Out,
 ) -> HRESULT {
     let Some(native) = native else {
@@ -152,6 +153,7 @@ pub(super) unsafe fn wrap<const CONSOLE_LAYOUT: bool>(
         },
     };
     let mut state = super::ResourceState::from(backing);
+    state.enhanced_barriers = enhanced_barriers;
     state.blas_buffer = device
         .state
         .blas

@@ -218,10 +218,8 @@ pub(super) unsafe extern "system" fn place(
     }
     let mut host = primary.unwrap_or(*desc);
     host.Flags.0 &= super::format::HOST_FLAGS;
-    let allocation = |host: &D3D12_RESOURCE_DESC| unsafe {
-        device
-            .native
-            .GetResourceAllocationInfo(0, core::slice::from_ref(host))
+    let allocation = |host: &D3D12_RESOURCE_DESC| {
+        super::allocation::allocation_info_for(&device.native, 0, host)
     };
     let fits = |info: &D3D12_RESOURCE_ALLOCATION_INFO| {
         info.SizeInBytes != u64::MAX
@@ -276,14 +274,40 @@ pub(super) unsafe extern "system" fn place(
         return report("range", E_INVALIDARG);
     }
     let host_clear = super::format::host_clear(clear);
+    let clear_ptr = host_clear.as_ref().map_or(clear, core::ptr::from_ref);
+    let host_initial = super::host_state(initial, desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER);
+    let packed = super::allocation::packed_uav_formats(host.Format, host.Flags);
+    let mut enhanced_barriers = false;
     let mut native = None;
-    if let Err(error) = unsafe {
+    if !packed.is_empty() && !super::dxgi::supports_native_packed_uav(device, host.Format) {
+        let Ok(api) = device.native.cast::<ID3D12Device10>() else {
+            return report("host", E_NOTIMPL);
+        };
+        let Some(layout) = super::allocation::initial_barrier_layout(host_initial) else {
+            return report("host", E_NOTIMPL);
+        };
+        let host1 = super::allocation::resource_desc1(&host);
+        if let Err(error) = unsafe {
+            api.CreatePlacedResource2::<_, ID3D12Resource>(
+                &heap.native,
+                offset,
+                &host1,
+                layout,
+                clear_ptr.as_ref().map(core::ptr::from_ref),
+                Some(packed),
+                &mut native,
+            )
+        } {
+            return report("host", error.code());
+        }
+        enhanced_barriers = layout != D3D12_BARRIER_LAYOUT_COMMON;
+    } else if let Err(error) = unsafe {
         device.native.CreatePlacedResource::<_, ID3D12Resource>(
             &heap.native,
             offset,
             &host,
-            super::host_state(initial, desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER),
-            Some(host_clear.as_ref().map_or(clear, core::ptr::from_ref)),
+            host_initial,
+            Some(clear_ptr),
             &mut native,
         )
     } {
@@ -297,6 +321,7 @@ pub(super) unsafe extern "system" fn place(
             primary.as_ref(),
             initial,
             native,
+            enhanced_barriers,
             out,
         )
     }
@@ -518,8 +543,26 @@ pub(super) unsafe extern "system" fn committed_layout(
     if !protected.is_null() { return E_NOTIMPL; }
     if count > 0 && formats.is_null() { return E_INVALIDARG; }
     let packed = super::allocation::packed_uav_formats(desc.Format, desc.Flags);
-    let castable = if count == 0 { (!packed.is_empty()).then_some(packed) }
-        else { Some(unsafe { std::slice::from_raw_parts(formats, count as usize) }) };
+    let mut merged_castable = Vec::new();
+    let castable = if count == 0 {
+        (!packed.is_empty()).then_some(packed)
+    } else {
+        let caller = unsafe { std::slice::from_raw_parts(formats, count as usize) };
+        if !packed.is_empty()
+            && !super::dxgi::supports_native_packed_uav(device, desc.Format)
+            && packed.iter().any(|fmt| !caller.contains(fmt))
+        {
+            merged_castable.extend_from_slice(caller);
+            for &fmt in packed {
+                if !merged_castable.contains(&fmt) {
+                    merged_castable.push(fmt);
+                }
+            }
+            Some(merged_castable.as_slice())
+        } else {
+            Some(caller)
+        }
+    };
     // A float depth plane with a writable companion is not created through this entry point.
     let paired = super::depth::paired(desc);
     let translated = super::depth::primary(desc).filter(|_| !paired || desc.Format == super::format::D16_UNORM_S8_UINT);

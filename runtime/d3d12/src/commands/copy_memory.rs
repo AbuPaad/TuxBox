@@ -204,7 +204,9 @@ fn regions_for(
     resource: &ID3D12Resource,
 ) -> Result<(u64, Vec<Region>, Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>)> {
     let desc = unsafe { resource.GetDesc() };
-    let count = subresource_count(device, &desc).ok_or(E_INVALIDARG)?;
+    let footprint_desc = crate::device::allocation::copy_footprint_desc(&desc);
+    let desc_for_footprints = footprint_desc.as_ref().unwrap_or(&desc);
+    let count = subresource_count(device, desc_for_footprints).ok_or(E_INVALIDARG)?;
     let mut layouts = vec![D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); count as usize];
     let mut rows = vec![0u32; count as usize];
     let mut row_bytes = vec![0u64; count as usize];
@@ -212,7 +214,7 @@ fn regions_for(
     // SAFETY: the three output slices have one entry per subresource.
     unsafe {
         device.GetCopyableFootprints(
-            &desc,
+            desc_for_footprints,
             0,
             count,
             0,

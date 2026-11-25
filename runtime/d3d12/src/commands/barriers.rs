@@ -1,6 +1,135 @@
 //! Resource barriers and cache flushes.
 use super::*;
 
+enum DeferredBarrier<'a> {
+    Depth(&'a ID3D12Resource, &'a device::depth::Pair),
+    Enhanced {
+        resource: &'a ID3D12Resource,
+        before: (D3D12_BARRIER_SYNC, D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT),
+        after: (D3D12_BARRIER_SYNC, D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT),
+    },
+}
+
+fn legacy_barrier_scope(
+    state: D3D12_RESOURCE_STATES,
+    list_type: D3D12_COMMAND_LIST_TYPE,
+) -> Option<(D3D12_BARRIER_SYNC, D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT)> {
+    let layout = device::allocation::initial_barrier_layout(state)?;
+    let copy_only = list_type == D3D12_COMMAND_LIST_TYPE_COPY;
+    let compute_only = list_type == D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    let (sync, access) = match layout {
+        D3D12_BARRIER_LAYOUT_COMMON => (
+            if copy_only { D3D12_BARRIER_SYNC_COPY } else { D3D12_BARRIER_SYNC_ALL },
+            D3D12_BARRIER_ACCESS_COMMON,
+        ),
+        D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS => (
+            if compute_only { D3D12_BARRIER_SYNC_COMPUTE_SHADING } else { D3D12_BARRIER_SYNC_ALL_SHADING },
+            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+        ),
+        D3D12_BARRIER_LAYOUT_RENDER_TARGET => (
+            D3D12_BARRIER_SYNC_RENDER_TARGET,
+            D3D12_BARRIER_ACCESS_RENDER_TARGET,
+        ),
+        D3D12_BARRIER_LAYOUT_COPY_DEST => (
+            D3D12_BARRIER_SYNC_COPY,
+            D3D12_BARRIER_ACCESS_COPY_DEST,
+        ),
+        D3D12_BARRIER_LAYOUT_COPY_SOURCE => (
+            D3D12_BARRIER_SYNC_COPY,
+            D3D12_BARRIER_ACCESS_COPY_SOURCE,
+        ),
+        D3D12_BARRIER_LAYOUT_RESOLVE_DEST => (
+            D3D12_BARRIER_SYNC_RESOLVE,
+            D3D12_BARRIER_ACCESS_RESOLVE_DEST,
+        ),
+        D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE => (
+            D3D12_BARRIER_SYNC_RESOLVE,
+            D3D12_BARRIER_ACCESS_RESOLVE_SOURCE,
+        ),
+        D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE => (
+            D3D12_BARRIER_SYNC_PIXEL_SHADING,
+            D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE,
+        ),
+        D3D12_BARRIER_LAYOUT_SHADER_RESOURCE => {
+            let sync = if compute_only {
+                D3D12_BARRIER_SYNC_COMPUTE_SHADING
+            } else if state == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE {
+                D3D12_BARRIER_SYNC_PIXEL_SHADING
+            } else if state == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE {
+                D3D12_BARRIER_SYNC_NON_PIXEL_SHADING
+            } else {
+                D3D12_BARRIER_SYNC_ALL_SHADING
+            };
+            (sync, D3D12_BARRIER_ACCESS_SHADER_RESOURCE)
+        }
+        D3D12_BARRIER_LAYOUT_GENERIC_READ => {
+            if copy_only {
+                (D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_SOURCE)
+            } else {
+                let shading = if compute_only {
+                    D3D12_BARRIER_SYNC_COMPUTE_SHADING
+                } else {
+                    D3D12_BARRIER_SYNC_ALL_SHADING
+                };
+                (
+                    shading | D3D12_BARRIER_SYNC_COPY,
+                    D3D12_BARRIER_ACCESS_SHADER_RESOURCE | D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                )
+            }
+        }
+        _ => return None,
+    };
+    Some((sync, access, layout))
+}
+
+fn emit_enhanced_transition(
+    list: &List,
+    resource: &ID3D12Resource,
+    subresource: u32,
+    before: (D3D12_BARRIER_SYNC, D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT),
+    after: (D3D12_BARRIER_SYNC, D3D12_BARRIER_ACCESS, D3D12_BARRIER_LAYOUT),
+) -> Result<(), HRESULT> {
+    let list_type = unsafe { list.native.GetType() };
+    let copy_api;
+    let api = if list_type == D3D12_COMMAND_LIST_TYPE_COPY {
+        copy_api = list.native.cast::<ID3D12GraphicsCommandList7>().map_err(|_| E_NOTIMPL)?;
+        &copy_api
+    } else {
+        list.state
+            .enhanced_barriers
+            .get_or_init(|| enhanced_barriers(&list.native))
+            .as_ref()
+            .ok_or(E_NOTIMPL)?
+    };
+    let mut tb = D3D12_TEXTURE_BARRIER {
+        SyncBefore: before.0,
+        SyncAfter: after.0,
+        AccessBefore: before.1,
+        AccessAfter: after.1,
+        LayoutBefore: before.2,
+        LayoutAfter: after.2,
+        pResource: core::mem::ManuallyDrop::new(None),
+        Subresources: D3D12_BARRIER_SUBRESOURCE_RANGE {
+            IndexOrFirstMipLevel: subresource,
+            ..Default::default()
+        },
+        Flags: D3D12_TEXTURE_BARRIER_FLAG_NONE,
+    };
+    unsafe {
+        ptr::from_mut(&mut tb.pResource)
+            .cast::<*mut c_void>()
+            .write(resource.as_raw());
+        api.Barrier(&[D3D12_BARRIER_GROUP {
+            Type: D3D12_BARRIER_TYPE_TEXTURE,
+            NumBarriers: 1,
+            Anonymous: D3D12_BARRIER_GROUP_0 {
+                pTextureBarriers: &tb,
+            },
+        }]);
+    }
+    Ok(())
+}
+
 pub(super) unsafe extern "system" fn transition(
     list: &List,
     count: u32,
@@ -121,7 +250,24 @@ pub(super) unsafe extern "system" fn transition(
                 if host.flags != D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY && different {
                     handoffs.try_reserve(1).map_err(|_| E_OUTOFMEMORY)?;
                     let index = unsafe { ptr::from_ref(barrier).offset_from(barriers) } as usize;
-                    handoffs.push((index, &resource.native, pair));
+                    handoffs.push((index, DeferredBarrier::Depth(&resource.native, pair)));
+                }
+                host.resource = ptr::null_mut();
+            } else if resource.state.enhanced_barriers {
+                if host.flags != D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY && different {
+                    let list_type = unsafe { list.native.GetType() };
+                    let before = legacy_barrier_scope(host.before, list_type).ok_or(E_NOTIMPL)?;
+                    let after = legacy_barrier_scope(host.after, list_type).ok_or(E_NOTIMPL)?;
+                    handoffs.try_reserve(1).map_err(|_| E_OUTOFMEMORY)?;
+                    let index = unsafe { ptr::from_ref(barrier).offset_from(barriers) } as usize;
+                    handoffs.push((
+                        index,
+                        DeferredBarrier::Enhanced {
+                            resource: &resource.native,
+                            before,
+                            after,
+                        },
+                    ));
                 }
                 host.resource = ptr::null_mut();
             } else if let Some(placed) = resource.state.placed() {
@@ -168,8 +314,21 @@ pub(super) unsafe extern "system" fn transition(
                     && barrier.transition.resource.is_null()
                 {
                     submit(&host[first..index]);
-                    if let Some((_, resource, pair)) = handoffs.next_if(|(at, _, _)| *at == index) {
-                        depth::handoff(&list.native, resource, pair, &barrier.transition);
+                    if let Some((_, deferred)) = handoffs.next_if(|(at, _)| *at == index) {
+                        match deferred {
+                            DeferredBarrier::Depth(resource, pair) => {
+                                depth::handoff(&list.native, resource, pair, &barrier.transition);
+                            }
+                            DeferredBarrier::Enhanced { resource, before, after } => {
+                                emit_enhanced_transition(
+                                    list,
+                                    resource,
+                                    barrier.transition.subresource,
+                                    before,
+                                    after,
+                                )?;
+                            }
+                        }
                     }
                     first = index + 1;
                 }
@@ -280,3 +439,7 @@ pub(super) fn global_cache_barrier(list: &List, state: &mut Recording) {
     // SAFETY: the native open list consumes the stack-backed group during Barrier.
     unsafe { native.Barrier(&[group]) };
 }
+
+#[cfg(test)]
+#[path = "../tests/commands/barriers.rs"]
+mod tests;

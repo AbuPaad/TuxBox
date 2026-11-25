@@ -121,7 +121,7 @@ pub(super) fn texture_address_covering(device: &Device, address: u64, bytes: u64
     }
     let offset = address - entry.base as u64;
     let end = offset.checked_add(bytes)?;
-    let info = unsafe { device.native.GetResourceAllocationInfo(0, std::slice::from_ref(&desc)) };
+    let info = super::super::allocation::allocation_info_for(&device.native, 0, &desc);
     let covers = if info.SizeInBytes != 0 && info.SizeInBytes != u64::MAX {
         end <= info.SizeInBytes
     } else {

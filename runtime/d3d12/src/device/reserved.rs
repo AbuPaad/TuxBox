@@ -78,12 +78,36 @@ pub(super) unsafe extern "system" fn create(
     let initial = format::host_initial_state(desc, initial);
     let texture = desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER;
     let host_clear = format::host_clear(clear);
+    let clear_ptr = host_clear.as_ref().map_or(clear, core::ptr::from_ref);
+    let host_initial = host_state(initial, texture);
+    let packed = super::allocation::packed_uav_formats(host_desc.Format, host_desc.Flags);
+    let mut enhanced_barriers = false;
     let mut native = None;
-    if let Err(error) = unsafe {
+    if !packed.is_empty() && !super::dxgi::supports_native_packed_uav(device, host_desc.Format) {
+        let Ok(api) = device.native.cast::<ID3D12Device10>() else {
+            return E_NOTIMPL;
+        };
+        let Some(layout) = super::allocation::initial_barrier_layout(host_initial) else {
+            return E_NOTIMPL;
+        };
+        if let Err(error) = unsafe {
+            api.CreateReservedResource2::<_, ID3D12Resource>(
+                &host_desc,
+                layout,
+                clear_ptr.as_ref().map(core::ptr::from_ref),
+                None,
+                Some(packed),
+                &mut native,
+            )
+        } {
+            return error.code();
+        }
+        enhanced_barriers = layout != D3D12_BARRIER_LAYOUT_COMMON;
+    } else if let Err(error) = unsafe {
         device.native.CreateReservedResource::<ID3D12Resource>(
             &host_desc,
-            host_state(initial, texture),
-            Some(host_clear.as_ref().map_or(clear, core::ptr::from_ref)),
+            host_initial,
+            Some(clear_ptr),
             &mut native,
         )
     } {
@@ -95,7 +119,18 @@ pub(super) unsafe extern "system" fn create(
     };
     // The guest description is what views and copies report. The host image
     // is the reserved resource, so it has no heap of its own.
-    unsafe { depth::wrap::<false>(device, &properties, desc, None, initial, native, out) }
+    unsafe {
+        depth::wrap::<false>(
+            device,
+            &properties,
+            desc,
+            None,
+            initial,
+            native,
+            enhanced_barriers,
+            out,
+        )
+    }
 }
 
 fn pageables(

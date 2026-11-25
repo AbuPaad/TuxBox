@@ -30,7 +30,7 @@ use windows::core::{GUID, HRESULT, IUnknown, Interface, InterfaceRef, Result};
 use crate::commands::{wrap_command_list, wrap_command_queue};
 use crate::proxy::{Proxy, Slot, Slots, allocate, check_output, child_slots, object_slots, unwrap};
 
-mod allocation;
+pub(crate) mod allocation;
 mod fallback;
 pub(crate) mod blas;
 pub(crate) mod compute;
@@ -94,6 +94,11 @@ pub(crate) struct ResourceState {
     texture_address: std::sync::OnceLock<std::sync::Arc<views::TextureAddress>>,
     blas_buffer: Option<blas::Registration>,
     stencil: std::sync::OnceLock<std::sync::Arc<stencil::Surface>>,
+    /// Created through an enhanced-layout API (`CreateCommittedResource3` /
+    /// `CreatePlacedResource2` / `CreateReservedResource2`) in a non-COMMON
+    /// initial layout on behalf of a legacy state-based slot, so legacy
+    /// transition barriers must be emitted as enhanced texture barriers.
+    pub(crate) enhanced_barriers: bool,
 }
 impl ResourceState {
     /// Guest description of an image whose host format family differs.
@@ -126,6 +131,7 @@ impl From<Backing> for ResourceState {
             texture_address: Default::default(),
             blas_buffer: None,
             stencil: Default::default(),
+            enhanced_barriers: false,
         }
     }
 }
