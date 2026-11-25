@@ -827,7 +827,14 @@ void descriptor_reclaim(ID3D12Device* device) {
     D3D12_DESCRIPTOR_HEAP_DESC heap_desc{
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, heap_descriptors, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 1};
     ComPtr<ID3D12DescriptorHeap> view_heap;
-    check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&view_heap)), "create oversized view heap");
+    // The steps below count on a resident limit of 1,000,000 descriptors. The
+    // provider takes the host's MaxViewDescriptorHeapSize when that is larger,
+    // and then step 5 never overflows. Pin the limit while this heap is created.
+    if (!SetEnvironmentVariableW(L"TUXBOX_DESCRIPTOR_HEAP_LIMIT", L"1000000"))
+        throw std::runtime_error("cannot pin the descriptor heap limit");
+    const HRESULT created = device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&view_heap));
+    SetEnvironmentVariableW(L"TUXBOX_DESCRIPTOR_HEAP_LIMIT", nullptr);
+    check(created, "create oversized view heap");
     const UINT stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     if (!stride) throw std::runtime_error("zero view descriptor stride");
     const SIZE_T cpu_base = method<frame_abi::CpuHandle>(view_heap.Get(), 9)(view_heap.Get());
