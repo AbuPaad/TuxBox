@@ -298,6 +298,36 @@ pub(super) fn allocation_info_for(
     unsafe { device.GetResourceAllocationInfo(visible, core::slice::from_ref(desc)) }
 }
 
+/// Requirements of a sampled 2D texture with an undefined layout at 4 KiB alignment.
+///
+/// XG lays these out as the 4 KiB swizzle. GTA sizes its texture memory and its file
+/// reads with this answer, then creates the texture with that swizzle. A host driver may
+/// use smaller tiles for narrow images, and a read that does not fit its stream fails.
+/// Keep the host's answer when it needs more, so host heap placements still fit.
+fn small_texture(
+    native: &ID3D12Device,
+    visible: u32,
+    desc: &D3D12_RESOURCE_DESC,
+) -> Option<D3D12_RESOURCE_ALLOCATION_INFO> {
+    const NO_METADATA: i32 = 0x0030_0000;
+    const TILE_4K: D3D12_TEXTURE_LAYOUT = D3D12_TEXTURE_LAYOUT(0x105);
+    let small = u64::from(D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT);
+    if desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
+        || desc.Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN
+        || desc.Alignment != small
+        || desc.Flags.0 & !NO_METADATA != 0
+    {
+        return None;
+    }
+    let plane = super::placement::color_plane(&D3D12_RESOURCE_DESC { Layout: TILE_4K, ..*desc }).ok()?;
+    let mut info = allocation_info_for(native, visible, desc);
+    if info.SizeInBytes == u64::MAX || info.Alignment != small {
+        return None;
+    }
+    info.SizeInBytes = info.SizeInBytes.max(plane.size);
+    Some(info)
+}
+
 // Like GetResourceAllocationInfo, this Xbox vtable entry places the struct
 // return pointer before the device. GTA queries default, upload and readback.
 pub(super) unsafe extern "system" fn custom_heap_properties(
@@ -353,7 +383,8 @@ unsafe fn info_impl(
         !packed_uav_formats(d.Format, d.Flags).is_empty()
             && !super::dxgi::supports_native_packed_uav(device, d.Format)
     };
-    if descs.iter().any(|d| super::placement::console_layout(d.Layout.0) || needs_packed(d)) {
+    let small = |d: &D3D12_RESOURCE_DESC| small_texture(&device.native, visible, d);
+    if descs.iter().any(|d| super::placement::console_layout(d.Layout.0) || needs_packed(d) || small(d).is_some()) {
         // The guest will allocate these bytes itself and pass the address to
         // CreatePlacedResourceX. Account for the Xbox planes and batch padding.
         let mut bytes = 0u64;
@@ -372,6 +403,8 @@ unsafe fn info_impl(
                 }
             } else if needs_packed(desc) {
                 allocation_info_for(&device.native, visible, desc)
+            } else if let Some(item) = small(desc) {
+                item
             } else {
                 let mut item = invalid;
                 unsafe { info(&mut item, device, visible, 1, desc) };

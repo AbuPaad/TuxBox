@@ -77,6 +77,45 @@ void allocation_info(ID3D12Device* guest, ID3D12Device* host) {
     compare(0, UINT(resources.size()), resources.data(), true);
     texture.Dimension = D3D12_RESOURCE_DIMENSION_UNKNOWN;
     compare(0, 1, &texture, false);
+
+    // Narrow textures keep whole 4 KiB tiles, which a host driver may not give them.
+    struct Case { DXGI_FORMAT format; UINT width, height, mips; UINT64 bytes; };
+    constexpr Case cases[] = {
+        {DXGI_FORMAT_R16G16B16A16_FLOAT, 256, 2, 1, 0x8000},
+        {DXGI_FORMAT_BC6H_UF16, 1024, 4, 1, 0x10000},
+        {DXGI_FORMAT_BC7_UNORM_SRGB, 128, 16, 3, 0x4000},
+        {DXGI_FORMAT_BC1_UNORM, 32, 128, 4, 0x3000},
+    };
+    std::array<D3D12_RESOURCE_DESC, std::size(cases)> narrow{};
+    UINT64 total = 0;
+    bool placeable = true;
+    for (size_t i = 0; i < std::size(cases); ++i) {
+        auto& desc = narrow[i];
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+        desc.Format = cases[i].format;
+        desc.Width = cases[i].width;
+        desc.Height = cases[i].height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = UINT16(cases[i].mips);
+        desc.SampleDesc.Count = 1;
+        const auto reference = host->GetResourceAllocationInfo(0, 1, &desc);
+        if (reference.Alignment != desc.Alignment) {
+            placeable = false;
+            compare(0, 1, &desc, reference.SizeInBytes != UINT64_MAX);
+            continue;
+        }
+        const UINT64 bytes = std::max(reference.SizeInBytes, cases[i].bytes);
+        D3D12_RESOURCE_ALLOCATION_INFO info{};
+        query_allocation(&info, guest, 0, 1, &desc);
+        require(info.SizeInBytes == bytes && info.Alignment == desc.Alignment, "narrow texture size");
+        total += bytes;
+    }
+    if (placeable) {
+        D3D12_RESOURCE_ALLOCATION_INFO info{};
+        query_allocation(&info, guest, 0, UINT(narrow.size()), narrow.data());
+        require(info.SizeInBytes == total && info.Alignment == narrow[0].Alignment, "narrow texture batch");
+    }
 }
 
 template<class T, size_t N>
