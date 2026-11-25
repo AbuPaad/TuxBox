@@ -81,6 +81,16 @@ struct Memory {
     UINT64 read64(size_t offset) const { return *reinterpret_cast<volatile const UINT64*>(base + offset); }
 };
 
+ComPtr<ID3D12GraphicsCommandList> open_list(ID3D12Device* device, D3D12_COMMAND_LIST_TYPE type,
+                                             ID3D12CommandAllocator* allocator) {
+    const UINT record[] = {UINT(type), 0, 1, 0};
+    ComPtr<ID3D12GraphicsCommandList> list;
+    check(method<frame_abi::CreateList>(device, device_create_list)(
+              device, record, allocator, nullptr, IID_PPV_ARGS(&list)), "create list");
+    check(list->Reset(allocator, nullptr), "open list");
+    return list;
+}
+
 struct Queue {
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12CommandAllocator> allocator;
@@ -93,10 +103,7 @@ struct Queue {
         desc.Type = type;
         check(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue)), "create queue");
         check(device->CreateCommandAllocator(type, IID_PPV_ARGS(&allocator)), "create allocator");
-        const UINT record[] = {UINT(type), 0, 1, 0};
-        check(method<frame_abi::CreateList>(device, device_create_list)(
-                  device, record, allocator.Get(), nullptr, IID_PPV_ARGS(&list)), "create list");
-        check(list->Reset(allocator.Get(), nullptr), "open list");
+        list = open_list(device, type, allocator.Get());
         check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "create fence");
     }
     void write32(UINT64 address, UINT value, UINT flush = 0) {
@@ -165,17 +172,45 @@ void labels(ID3D12Device* device) {
 // A compute queue waits for a label the direct queue writes later, and the
 // direct queue then waits for the compute queue's answer.
 void cross_queue(ID3D12Device* device) {
-    Memory memory(65536);
+    constexpr size_t request = 0, reply = 8, payload = 65536, readback = 2 * 65536;
+    constexpr UINT64 expected = 0x123456789abcdef0ull;
+    Memory memory(3 * 65536);
     Queue compute(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
     Queue direct(device, D3D12_COMMAND_LIST_TYPE_DIRECT);
-    compute.wait64(memory.address(0), 5);
-    compute.write64(memory.address(8), 6);
+
+    compute.wait64(memory.address(request), 5);
+    compute.write64(memory.address(payload), expected);
+    compute.write64(memory.address(reply), 6);
     compute.submit();
-    direct.write64(memory.address(0), 5);
+
+    // Record the return wait while the compute queue is still waiting for the request.
+    direct.wait64(memory.address(reply), 6);
+    method<CopyMemory_>(direct.list.Get(), slot_copy_memory)(
+        direct.list.Get(), memory.address(readback), memory.address(payload), sizeof(expected), 0);
+
+    ComPtr<ID3D12CommandAllocator> request_allocator;
+    check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&request_allocator)),
+          "create request allocator");
+    auto request_list = open_list(device, D3D12_COMMAND_LIST_TYPE_DIRECT, request_allocator.Get());
+    method<Write64>(request_list.Get(), slot_write64)(request_list.Get(), memory.address(request), 5, 0, 0);
+    check(request_list->Close(), "close request list");
+    ID3D12CommandList* batch[]{request_list.Get()};
+    direct.queue->ExecuteCommandLists(1, batch);
     direct.submit();
-    direct.finish("direct queue");
-    compute.finish("compute queue waiting on a direct queue label");
-    expect_value(memory, 8, 6, "compute answer");
+
+    try {
+        compute.finish("compute queue waiting on a direct queue label");
+        direct.finish("direct queue waiting on the compute reply");
+    } catch (const std::runtime_error&) {
+        // Let pending GPU work drain before its lists and title memory are released.
+        InterlockedExchange64(reinterpret_cast<volatile LONG64*>(memory.base + request), 5);
+        InterlockedExchange64(reinterpret_cast<volatile LONG64*>(memory.base + reply), 6);
+        compute.finish("drain compute queue after failed wait");
+        direct.finish("drain direct queue after failed wait");
+        throw;
+    }
+    expect_value(memory, reply, 6, "compute reply");
+    expect_value(memory, readback, expected, "payload copied after the compute reply");
 }
 
 // The compute queue submits through ExecuteCommandListsX as well.
