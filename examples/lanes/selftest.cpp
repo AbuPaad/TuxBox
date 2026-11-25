@@ -353,11 +353,14 @@ void dispatch_wait(ID3D12Device* device) {
         direct.write64(memory.address(payload), expected);
         direct.write64(memory.address(label), 1);
         if (!after_dispatch) compute.wait64(memory.address(label), 1);
-        const UINT constants[] = {0x5194c0d1u, 1};
-        method<SetRoot>(list, slot_compute_root)(list, root.Get());
-        list->SetPipelineState(pipeline.Get());
-        method<SetConstants>(list, slot_root_constants)(list, 0, 2, constants, 0);
-        method<SetUav>(list, slot_root_uav)(list, 1, output->GetGPUVirtualAddress());
+        auto bind_course = [&] {
+            const UINT constants[] = {0x5194c0d1u, 1};
+            method<SetRoot>(list, slot_compute_root)(list, root.Get());
+            list->SetPipelineState(pipeline.Get());
+            method<SetConstants>(list, slot_root_constants)(list, 0, 2, constants, 0);
+            method<SetUav>(list, slot_root_uav)(list, 1, output->GetGPUVirtualAddress());
+        };
+        bind_course();
         list->Dispatch(1, 1, 1);
         if (after_dispatch) compute.wait64(memory.address(label), 1);
         method<CopyMemory_>(list, slot_copy_memory)(
@@ -392,6 +395,43 @@ void dispatch_wait(ID3D12Device* device) {
                       static_cast<unsigned long long>(value), row);
         std::fprintf(stderr, "%s\n", result);
         if (early || value != expected) throw std::runtime_error(result);
+        if (!after_dispatch) continue;
+
+        // Reuse the guest list. Each prefix must reach its marker before the
+        // producer releases that wait, and compute bindings must survive both.
+        constexpr size_t progress = 8;
+        compute.reopen();
+        compute_fixture::transition(list, output.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        bind_course();
+        list->Dispatch(1, 1, 1);
+        for (UINT stage : {1u, 2u}) {
+            compute.write64(memory.address(progress), stage);
+            compute.wait64(memory.address(label), stage + 1);
+        }
+        const UINT seed = 2;
+        method<SetConstants>(list, slot_root_constants)(list, 0, 1, &seed, 0);
+        list->Dispatch(1, 1, 1);
+        compute_fixture::transition(list, output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list->CopyBufferRegion(proof.Get(), 0, output.Get(), 0, sizeof(UINT));
+        compute.submit();
+        bool prefixes_in_order = true;
+        for (UINT stage : {1u, 2u}) {
+            const auto until = GetTickCount64() + deadline_ms;
+            while (memory.read64(progress) < stage && GetTickCount64() < until) Sleep(1);
+            prefixes_in_order &= memory.read64(progress) == stage && compute.fence->GetCompletedValue() < compute.submitted;
+            direct.reopen();
+            direct.write64(memory.address(label), stage + 1);
+            direct.submit();
+            direct.finish("release dispatch-wait stage");
+        }
+        compute.finish("resumed dispatch after two waits");
+        if (!prefixes_in_order) throw std::runtime_error("compute prefixes did not reach their waits in order");
+        check(proof->Map(0, &range, &mapped), "map resumed dispatch proof");
+        const UINT resumed = *static_cast<const UINT*>(mapped);
+        proof->Unmap(0, &empty);
+        if ((resumed & 255) != seed) throw std::runtime_error("compute bindings lost across waits");
     }
 }
 
