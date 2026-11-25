@@ -262,6 +262,68 @@ void copy_memory(ID3D12Device* device) {
         throw std::runtime_error("memory copy overwrote its source");
 }
 
+// Compare a direct queue waiting before and immediately after a buffer copy.
+// The compute producer remains unsubmitted during the observation window.
+void direct_copy_wait(ID3D12Device* device) {
+    constexpr UINT marker = 0x5a17c0de;
+    constexpr UINT64 expected = 0x12345678;
+    constexpr size_t label = 0, payload = 65536, copied = 2 * 65536;
+    bool passed = true;
+    for (bool after_copy : {false, true}) {
+        Memory memory(3 * 65536);
+        std::memset(memory.base + copied, 0xcc, sizeof(expected));
+        Queue direct(device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+        Queue compute(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+        const UINT seeds[]{0, marker};
+        auto upload = buffer(device, D3D12_HEAP_TYPE_UPLOAD, sizeof(seeds), D3D12_RESOURCE_STATE_GENERIC_READ);
+        auto progress = buffer(device, D3D12_HEAP_TYPE_READBACK, sizeof(marker), D3D12_RESOURCE_STATE_COPY_DEST);
+        compute_fixture::upload(upload.Get(), seeds, sizeof(seeds));
+        auto* list = direct.list.Get();
+        list->CopyBufferRegion(progress.Get(), 0, upload.Get(), 0, sizeof(marker));
+        direct.submit();
+        direct.finish("initialize prefix marker");
+        direct.reopen();
+
+        auto read_marker = [&] {
+            D3D12_RANGE read{0, sizeof(marker)}, empty{};
+            void* mapped{};
+            check(progress->Map(0, &read, &mapped), "map prefix marker");
+            const UINT value = *static_cast<const volatile UINT*>(mapped);
+            progress->Unmap(0, &empty);
+            return value;
+        };
+        if (read_marker() != 0) throw std::runtime_error("bad initial prefix marker");
+
+        compute.write64(memory.address(payload), expected);
+        compute.write64(memory.address(label), 1);
+        if (!after_copy) direct.wait64(memory.address(label), 1);
+        list->CopyBufferRegion(progress.Get(), 0, upload.Get(), sizeof(UINT), sizeof(marker));
+        if (after_copy) direct.wait64(memory.address(label), 1);
+        method<CopyMemory_>(list, slot_copy_memory)(list, memory.address(copied), memory.address(payload),
+                                                   sizeof(expected), 0);
+        direct.submit();
+
+        Sleep(250);
+        const UINT64 completed = direct.fence->GetCompletedValue();
+        const UINT prefix = read_marker();
+        const UINT64 copied_before = memory.read64(copied);
+        compute.submit();
+        compute.finish("direct-copy-wait producer");
+        direct.finish("direct-copy-wait consumer");
+        if (completed == UINT64_MAX) throw std::runtime_error("device removed during direct-copy-wait");
+        expect_value(memory, label, 1, "producer label");
+        expect_value(memory, payload, expected, "producer payload");
+        if (read_marker() != marker) throw std::runtime_error("first buffer copy missing");
+        const bool early = completed >= direct.submitted;
+        const UINT64 value = memory.read64(copied);
+        std::fprintf(stderr, "direct-copy-wait position=%s prefix_before=0x%08x copied_before=0x%016llx completed_before_producer=%s cpu=0x%08llx\n",
+                     after_copy ? "after-copy" : "list-start", prefix, static_cast<unsigned long long>(copied_before), early ? "yes" : "no",
+                     static_cast<unsigned long long>(value));
+        passed &= prefix == (after_copy ? marker : 0u) && copied_before == 0xccccccccccccccccull && !early && value == expected;
+    }
+    if (!passed) throw std::runtime_error("direct queue copy ordering or readback mismatch");
+}
+
 // The compute queue waits for a label, then reads a guest texture the direct
 // queue writes before setting that label. A provider that makes the writer wait
 // for the earlier submitted reader deadlocks the two queues.
@@ -1294,6 +1356,7 @@ constexpr Scenario scenarios[] = {
     {L"compute-frame", compute_frame},
     {L"skipped-command", skipped_command},
     {L"copy-memory", copy_memory},
+    {L"direct-copy-wait", direct_copy_wait},
     {L"shared-texture", shared_texture},
     {L"indirect-dispatch", indirect_dispatch},
     {L"dispatch-wait", dispatch_wait},
@@ -1349,7 +1412,7 @@ std::string narrow(const wchar_t* text) {
 }
 
 const wchar_t* const selftest_scenarios[] = {L"labels",            L"cross-queue",      L"compute-frame",
-                                             L"skipped-command",   L"copy-memory",      L"shared-texture",
+                                             L"skipped-command",   L"copy-memory",      L"direct-copy-wait", L"shared-texture",
                                              L"indirect-dispatch", L"dispatch-wait", L"texture-readback", L"ray-tracing-builder",
                                              L"thread-dimensions", L"descriptor-reclaim",
                                              L"xbox-shader"};
