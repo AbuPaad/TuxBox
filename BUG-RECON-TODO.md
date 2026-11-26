@@ -869,9 +869,20 @@ of the underscore form the forks use (`0xe349_bd1a`), gives the same answer for 
 `XAccessibility` is present in our table but probe-only. The six that are absent entirely are
 `XAppCapture`, `XGameEvent`, `XGameInvite`, `XGameRuntimeFeature`, `XGameUi` and `XUserDevice`.
 
-A lesson about method, not code: the first sweep missed Belobug's analytics class because it searched for
-`b884675d` while the source writes `0xb884_675d`. Grep for the distinguishable prefix, or parse the
-numbers.
+The sweep was re-run after every clone finished, because the first pass read two trees while they were
+still arriving. The canonical upstream, `fxceless/victory-fork`, serves all twenty, so the twenty is the
+reference shape rather than one fork's local choice.
+
+`stellarr-studio/kelvaroq` scans to zero because it carries no HLE of its own. Its documentation says it
+compiles victory's loader, HLE and GPU crates and pins that fork at `2119b0e`.
+
+Two lessons about method, not code. The first sweep missed Belobug's analytics class because it searched
+for `b884675d` while the source writes `0xb884_675d`; grep the distinguishable prefix, or parse the
+numbers. The same sweep read half-cloned trees as empty, so a zero is only a fact once the clone has
+finished.
+
+Board note: `Zettrox/ztrx` is listed on PortWatch but GitHub returns "repository not found", so that row
+cannot be checked.
 
 **Architecture, worth taking.** Every fork intercepts `LoadLibrary` by name and serves the Xbox DLLs
 in-process. We ship real DLLs and let the loader find them. Both work. Theirs turns a missing or failing
