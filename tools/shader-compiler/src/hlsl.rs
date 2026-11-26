@@ -55,6 +55,9 @@ mod heap_resinfo;
 #[path = "tests/hlsl/mtbuf_format.rs"]
 mod mtbuf_format;
 #[cfg(test)]
+#[path = "tests/hlsl/typed_store_root.rs"]
+mod typed_store_root;
+#[cfg(test)]
 #[path = "tests/hlsl/compute_swizzle.rs"]
 mod compute_swizzle;
 #[cfg(test)]

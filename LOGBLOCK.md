@@ -114,8 +114,12 @@ Closes the store bucket of BR-27, 577 refusals.
 - Done for the heap and MTBUF half in this tree on 2026-11-27. A typed store now refuses with
   `typed buffer store needs a writable table [tbuffer_store_format_x @ 0x8, descriptor heap s8]`.
 - Still to add: the same suffix on `buffer_store_format to a non-UAV table` (`buffer.rs:610`) and
-  `image_store to a non-UAV table` (`image.rs:231`). Both sit behind a root-signature descriptor, so
-  they need a root fixture before a test can pin them.
+  `image_store to a non-UAV table` (`image.rs:231`). Both messages now carry it, but their fixtures
+  are not done. A first attempt sits in `tests/hlsl/typed_store_root.rs`, ignored: it reaches
+  `mubuf at 0x8: buffer in table of kind None`, so the root table needs the kind the analysis expects
+  for a typed buffer. That is where the next attempt starts.
+- Encoding facts for that fixture. The SOFFSET field is the top seven bits of an `s_load`'s second
+  word, where 0x7d means no offset. A MUBUF typed store is op 4 of encoding 0x38.
 - Keep: those lines for one session, with the refusal totals beside them.
 - Closes when: the lines name what share of the bucket is heap and what share is root. That decides
   which half can be finished on this host. BR-28 records why the answer is host-side work.

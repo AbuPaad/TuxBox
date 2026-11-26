@@ -626,7 +626,10 @@ impl<'a> Emitter<'a> {
             let nm = if is_uav { format!("utb{slot}") } else { format!("stb{slot}") };
             if ins.mnemonic.starts_with("buffer_store") {
                 if !is_uav {
-                    return Err("buffer_store_format to a non-UAV table".into());
+                    return Err(format!(
+                        "buffer_store_format to a non-UAV table [{} @ 0x{:x}, descriptor root slot {slot}]",
+                        ins.mnemonic, ins.offset
+                    ));
                 }
                 let mut c = vec![];
                 for k in 0..4u8 {

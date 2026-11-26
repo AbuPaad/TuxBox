@@ -228,7 +228,12 @@ impl<'a> Emitter<'a> {
             }
             if store {
                 if !is_uav {
-                    return Err("image_store to a non-UAV table".into());
+                    // Name the table the store targets, so a session log says which
+                    // slots this bucket is made of.
+                    return Err(format!(
+                        "image_store to a non-UAV table [{} @ 0x{:x}, slot {slot}]",
+                        ins.mnemonic, ins.offset
+                    ));
                 }
                 if let Some(t) = ity {
                     // Integer texels: the registers are stored as they are.
