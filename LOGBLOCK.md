@@ -88,6 +88,58 @@ Closes BR-17 and the stall in `docs/FOCUS.md:43`. It feeds BR-15 and BR-16.
 - Closes when: a stall names the operation each queue stopped on, on RADV. The NVIDIA half
   needs another card.
 
+## A2. Shader coverage — one session answers four buckets
+
+The refusals in BR-27 and BR-28 split into four groups. A run that carries these four lines turns
+them into a coverage report. The tracer is the work in front of the run.
+
+Each line belongs beside the existing request record in `project_tuxbox/runtime_shaders.py` and in the
+provider's shader cache, so one `--log-file` captures all of them.
+
+### LB-17 — Did the mesh root recording fire?
+
+Closes the mesh bucket of BR-27, 1,551 refusals.
+
+- Change: `compile::record_source` (`runtime/d3d12/src/device/shader_cache/compile.rs`) counts each
+  recorded rooted mesh program and prints the total once at exit.
+- Keep: the count of `mesh_link_source` calls that had a root, the count recorded, and the
+  `mesh root signature missing` lines from the preparation phase.
+- Closes when: the recorded count is not zero and the refusal count for that reason drops. A run with
+  zero recorded is the more useful result, because it says the recording path never ran.
+
+### LB-18 — What do the refused stores look like?
+
+Closes the store bucket of BR-27, 577 refusals.
+
+- Change: on each `buffer_store_format to a non-UAV table` and `image_store to a non-UAV table`
+  refusal, print the program digest, the slot, the descriptor's origin (heap or root), and
+  descriptor word 1 (the V#).
+- Keep: those lines for one session, with the refusal totals beside them.
+- Closes when: the lines name what share of the bucket is heap and what share is root. That decides
+  which half can be finished on this host. BR-28 records why the answer is host-side work.
+
+### LB-19 — Which descriptor stride does a refused `IDXEN` load need?
+
+Closes the `IDXEN` bucket of BR-27, 129 refusals.
+
+- Change: at the `raw buffer IDXEN needs the console descriptor stride` refusal
+  (`tools/shader-compiler/src/hlsl/emitter/buffer.rs:70`), print the slot and descriptor word 1.
+- Keep: the stride field from every refused program.
+- Closes when: the recorded strides can be compared against the V# values. Victory-United reads the
+  same field from the host (`SLOT_TABLE_STRIDES`, BR-28), so a disagreement between our decode and
+  theirs is a finding.
+
+### LB-20 — What does the large-program set cost to compile?
+
+Closes the wave-reduction bucket of BR-27, 1,502 refusals.
+
+- Artifact: the request archive from a preparation run. That archive already keeps each refused
+  program, so this item adds no switch.
+- Then measure here, with the `dxc` on this host, the DXIL size and the compile time of each large
+  program. The docs' trial reports 2-12 s and 1-2 MB per sample. A 1,502-program set multiplies that.
+- Closes when: the archive exists and the per-program figures are in hand. The decision on the
+  6,000-instruction limit follows from those figures, not from the refusal count.
+
 ## B. Switches that already exist
 
 Each of these needs one run with a documented switch.
@@ -229,10 +281,12 @@ Closes BR-12.
 
 Do not wait for a run on these.
 
-- BR-7, BR-15, BR-16, BR-19, BR-20: read the code and write the answer.
-- BR-27 items 1 to 3: root recording and stride recording, both offline. The work is in
-  progress on this tree.
-- BR-9: build-order bug. Reproduce with a clean tree.
+- BR-7, BR-15, BR-16, BR-19, BR-20: read the code and write the answer. This tree answers BR-7 and
+  BR-19.
+- BR-27 item 1, the mesh root recording, landed here (`4bdb158`). Its log line is LB-17.
+- BR-27 item 2, the `IDXEN` stride, is offline work with a log line at LB-19.
+- BR-27 item 3, the wave limit, needs the archive at LB-20 before any decision.
+- BR-9: build-order bug, fixed here (`37f20bd`).
 - `docs/FOCUS.md:24`: the black screen needs a screen capture, not a log.
 - `docs/FOCUS.md:21`: the audio stall needs the failing USB device attached, and the
   kernel log needs `systemd-journal` membership. Check both before promising a result.

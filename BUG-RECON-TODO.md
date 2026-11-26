@@ -693,10 +693,5 @@ shows the work spans the provider, which cannot be tested on this host.
 
 ### Logs this host still needs
 
-| Bucket | What a run must record |
-| --- | --- |
-| Mesh root, 1,551 | The count of `mesh root signature missing` before and after, and how many mesh pipelines had a root at creation |
-| Stores, 577 | Per refused instruction: heap descriptor or root descriptor, the descriptor word 1 (V#), and whether any root declares the slot as UAV |
-| `IDXEN`, 129 | The descriptor stride field for every refused program, to check the recorded stride against the V# |
-| Wave reduction, 1,502 | A recorded request archive, so DXIL size and DXC time can be measured here |
-| Quad helper lanes | One shadow edge captured on RADV and on NVIDIA, same scene |
+The four log lines and the archive moved into `LOGBLOCK.md` as LB-17 to LB-20, so this file does not
+carry a second copy of them. LB-6 already covers the shadow-edge capture for BR-5.
