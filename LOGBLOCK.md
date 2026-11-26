@@ -151,6 +151,19 @@ Closes the wave-reduction bucket of BR-27, 1,502 refusals.
 - Closes when: the archive exists and the per-program figures are in hand. The decision on the
   6,000-instruction limit follows from those figures, not from the refusal count.
 
+### LB-21 — How many host buffers does the page cache keep live?
+
+Closes action 1 of BR-30, and the import-count concern in `device/heap/pages.rs`.
+
+- Finding, 2026-11-27: this tree has no staging budget, because it does not stage. The title's
+  upload heaps go to vkd3d-proton. The comparable budget is the imported-heap page cache. Its
+  comment records about 4,500 live buffers, and RADV has to look at each one per submit.
+- Change: print once per thousand pages imported, and at exit, the live import count, the cache hit
+  rate and the largest pool. `PagePools::loose` and `PagePool::pages` hold the numbers.
+- Keep: those lines for one session, with the peak count and the frame it occurred on.
+- Closes when: you record the peak live count and the submit-time share at that peak. A bounded count
+  needs no cap. A count that grows without limit needs one.
+
 ## B. Switches that already exist
 
 Each of these needs one run with a documented switch.

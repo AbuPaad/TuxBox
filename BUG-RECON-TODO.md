@@ -781,8 +781,12 @@ and BR-22.
 
 Actions for this tree, in order:
 
-1. Find whether our upload path has a per-frame speculative cap. If it has none, add one with a
-   figure from the table, and a test that a single large texture is never split.
+1. Find whether our upload path has a per-frame speculative cap.
+   Answered on 2026-11-27: this tree does not stage, so there is nothing to cap. The title's upload
+   heaps go to vkd3d-proton. The comparable budget is the imported-heap page cache in
+   `device/heap/pages.rs`. Its comment records about 4,500 live buffers, and it notes that RADV has to
+   look at every live buffer on each submit. The log line for that is LB-21. Do not add a staging cap
+   to this tree.
 2. Write the allocator failure-injection test for our own pool, using their eight-size replay as the
    shape.
 3. Record the alias-flood result against BR-1 and BR-22 before anyone widens the alias propagation.
