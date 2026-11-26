@@ -32,6 +32,36 @@ du -sh --apparent-size /home/fih/bulk/media/downloads/GTA6.Xbox.v1.0.2.1-CYBERLE
 Recorded on 2026-11-27. Every entry that needs the title stays blocked until these two
 figures agree. Lanes runs are not blocked.
 
+Re-measured on 2026-11-27 evening: **49G actual against 209G apparent**, 107 files. No `.part` or
+`.!qB` marker exists, because the layout preallocates each RPF as a sparse file. Use the two `du`
+figures, never the file sizes.
+
+| Piece | Real bytes | Allocated | Share |
+| --- | --- | --- | --- |
+| `levels.rpf` | 33 G | 71 G | 46 % |
+| `pack/story000` | 4.7 G | 20 G | 24 % |
+| `data/ttdb` | 4.8 G | 57 G | 8 % |
+| `audio.rpf` | 2.4 G | 27 G | 9 % |
+| `pack/` others | 1.8 G | 10 G | ~18 % |
+| `movies.rpf` | 488 M | 8.3 G | 6 % |
+| `anim.rpf` | 442 M | 4.2 G | 10 % |
+| `shaders.rpf` | 159 M | 393 M | 40 % |
+| `textures.rpf` | 19 M | 184 M | 10 % |
+
+No large file is complete. The first level load reads `levels.rpf` and `pack/story000`, so a hang or
+a black screen from those two is a hole, not a layer regression. Say which one before filing a bug.
+
+The executable itself is present and verified. `/home/fih/bulk/media/downloads/early_xmas/game_scarlett_master.exe`
+is 120,181,760 bytes and hashes to
+`e95020b2fa4a721db3df59fdecf75621730ac559d8835252f6c3b658d5a08993`, the pinned build. Every companion
+DLL is present too: `msvcp140`, `vcruntime140`, `concrt140`, `vccorlib140`, `XboxBvhBuilder.dll`,
+`libHttpClient.GDK.dll`, `amd_fidelityfx_upscaler_xbox.dll`, `Bink2Scarlett.dll` and `XCurl.dll`.
+
+A boot attempt is possible now. Gameplay is not. Expect a hang during the first load.
+
+The `/mnt/GTA6` copy is a snapshot from when the package held 27 G. It is staler than the source and
+must not be used for anything but plumbing tests.
+
 ## A. Instrument first, then log
 
 These four questions have no log line today. Add the line, then run once.
