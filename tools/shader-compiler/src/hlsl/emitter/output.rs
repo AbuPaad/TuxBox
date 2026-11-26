@@ -385,7 +385,10 @@ uint tb_fmac_half(uint a, uint b, uint c) {
                 return Ok(h);
             }
             if self.compute_swizzle || self.indexed_lane {
-                writeln!(h, "groupshared uint tb_swizzle[{}];", tx * ty_ * tz).unwrap();
+                // A group of 32 or 96 lanes ends in half a guest wave64. A lane
+                // read can name a lane of its missing half, past the array.
+                writeln!(h, "#define TB_SWIZZLE_WORDS {}u\ngroupshared uint tb_swizzle[TB_SWIZZLE_WORDS];", tx * ty_ * tz).unwrap();
+                h.push_str("uint tb_swizzle_read(uint i) { return i < TB_SWIZZLE_WORDS ? tb_swizzle[i] : 0u; }\n");
             }
             if let Some(width) = self.required_wave_size.filter(|_| !self.portable_wave64) {
                 writeln!(h, "[WaveSize({width})]").unwrap();
