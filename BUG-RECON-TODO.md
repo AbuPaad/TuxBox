@@ -831,6 +831,54 @@ a package root with one real file and one symlink to a file outside the root.
 
 ---
 
+## BR-38 — DLL dependency audit against the other trees
+
+Status: `audit`, recorded 2026-11-27. Compiled from the title's import table, this tree's build output,
+the three DLL directories that matter, and eight forks.
+
+**Static imports: 66 names, all resolved.** The executable names 12 Xbox DLLs and 48 Windows API sets,
+and needs nothing that is missing.
+
+| Set | Count | Supplied by |
+| --- | --- | --- |
+| Xbox DLLs we build | 8 | `acphal`, `chad`, `d3d12_xs`, `xapu`, `XboxBvhBuilder`, `xcrdapi`, `xg_xs`, `xmem` |
+| Xbox DLLs the package ships | 3 | `amd_fidelityfx_loader_xbox`, `Bink2Scarlett`, `libhttpclient.gdk` |
+| Loaded by name at start-up | 1 | `xgameruntime.dll`, ours, 769,024 bytes |
+| API sets and Win32 | 48 + 6 | Wine, including every `api-ms-win-*` and `ext-ms-win-*` name |
+
+Function-level check against our builds: 44 of 44 imports resolved across the eight we supply, with no
+missing export. `GameInput` exports by ordinal and satisfies its one import.
+
+Function-level check against Wine's builtins: `mfplat` 6 of 6, `mfreadwrite` 1 of 1, `winhttp` 15 of 15,
+`ws2_32` 25 of 25, `bcrypt` 3 of 3, `advapi32` 3 of 3. The `psm-appnotify` API set carries four
+functions, `RegisterAppStateChangeNotification` and three others, and Wine implements all four in
+`twinapi.appcore.dll`. No gap there, whatever an earlier issue report suggested.
+
+**Where the trees differ is not DLLs.** Every fork mentions the same twelve names. The difference is
+which GDK **classes** their runtime answers. Ours serves six identified classes. The blocker found in
+BR-33 is `XSystemAnalytics` (`b884675d`), which this tree reports as unknown.
+
+`Belobug/VIctory-Belobug-AMD` does serve it, inside `crates/victory-hle/src/modules/xsystem.rs`. There
+the analytics interface id equals the provider's, and its `ANALYTICS` constant is the blocker GUID. The
+record it fills holds three strings. The console id is 38 characters, which is 39 bytes with the
+terminator. The sandbox name is 4 characters. The device identity is 32 bytes as base64, so 44
+characters and 45 bytes.
+
+That is the shape our `XSystemAnalytics` handler needs. The fork is GPL-3.0 code, so we take only the
+field sizes and the fixed-value approach. Our implementation is our own, with a credit.
+
+`DexNom/VIctory` does not serve the class at all, and neither do the other clones read. This is not a
+solved problem we can lift. It is one fork ahead of us on a single method.
+
+**Hard blocks that remain**, in order:
+
+1. This tree does not serve `XSystemAnalytics` yet. We can fix it now, and we know the shape.
+2. The package is 24 % byte-complete. Once the runtime serves enough classes, the title reads assets, and
+   holes read as zeros. That is where game data stops being optional.
+3. Nothing else. No missing DLL, no missing export, no API set gap.
+
+---
+
 ## BR-37 — The runtime probe misattributes callers under Wine
 
 Status: `bug`, recorded 2026-11-27. Found while reading the caller of an unserved GDK class.
