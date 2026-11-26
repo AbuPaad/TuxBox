@@ -831,6 +831,47 @@ a package root with one real file and one symlink to a file outside the root.
 
 ---
 
+## BR-36 — Series S profile fails because the registry trial nests bwrap
+
+Status: `bug` with a known cause, recorded 2026-11-27.
+
+`--graphics-profile series-s` raises `Could not select Series S mode in the temporary prefix` on this
+host, with no reason given. The message comes from `graphics_profile.py:79-83`, which reports only the
+return code of a `reg add` it runs inside a sandbox.
+
+The cause is nesting. `graphics_profile.py:76` wraps the host command in
+`bwrap --dev-bind / / --unshare-net -- ...`, and for the proton backend the host command is `umu-run`
+(`host.py:344`). umu-run starts the title through `pressure-vessel`, which calls `bwrap` a second time.
+This kernel refuses an unprivileged namespace inside another one:
+
+```
+pressure-vessel-wrap[1484728]: E: Child process exited with code 1: bwrap: No permissions to create
+a new namespace, likely because the kernel does not allow non-privileged user namespaces.
+INFO: umu-launcher version 1.4.4 (3.13.16), running 'GE-Proton11-14-x86_64' using runtime 'steamrt4'
+```
+
+Exit 1. Measured three ways, same prefix cloned with `cp -a --reflink=auto` each time:
+
+| Invocation | Result |
+| --- | --- |
+| distribution `wine` + `reg add`, no sandbox | exit 0, `reg: The operation completed successfully` |
+| `umu-run` + `reg add`, no sandbox | exit 0, but `Proton: Error: unable to use parent for game drive, path /home`, and no success line |
+| `bwrap --unshare-net -- umu-run` + `reg add` | **exit 1**, namespace refusal |
+
+So the registry write works, the Proton launcher round trip does not, and the sandbox is what breaks it.
+
+Wanted fix: run the trial with the distribution's own `wine` binary instead of `host.command`. The step
+writes one DWORD, so it needs neither umu's runtime nor its network isolation. Failing that, drop
+`--unshare-net` for this step alone and keep the isolation on the title start, where it matters.
+
+Also wanted: when `reg add` fails, print the output of the child. An exit code alone cannot separate a
+permission fault from a missing prefix. This one read as a Series S bug for a whole evening.
+
+Note for anyone reading a prefix log: `Proton: Error: unable to use parent for game drive, path /home`
+appears whenever the target lives under `/home`, and it is not the fault here.
+
+---
+
 ## BR-35 — A title run needs the whole provider set built and copied beside the exe
 
 Status: `finding`, recorded 2026-11-27. Found on the first `tuxbox.py run` of the title.
