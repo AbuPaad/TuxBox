@@ -364,7 +364,7 @@ titles stream textures late, so the symptom family matches.
 
 ## BR-19 — AMD compiler and wave hazards from klbf-lab
 
-Status: `verify`.
+Status: `done` for the skip list, `verify` for the wave and upload findings. Updated 2026-11-27.
 
 The `gmanka/klbf-lab` CHANGELOG on branch `klbf-amd` reports four AMD findings. Their author measured
 them on an RX 9070 XT.
@@ -384,6 +384,20 @@ Action: check whether preparation already records and skips a hash that fails to
 `ShaderRefused` in `project_tuxbox/runtime_shaders.py` suggests it does. Then decide whether a manual
 deny list adds anything. Their Proton users reach the world on an RX 7800 XT and an RX 6900 XT
 (`docs/GUIDE.md:119`).
+
+Answered and extended on 2026-11-27.
+
+Preparation already skips a program that fails to compile. `compile_one` writes `<key>.reason` and an
+`<key>.unsupported` marker, and `reuse()` returns the remembered reason on the next boot, so a refused
+translation costs one attempt. A manual deny list would duplicate that. It would also need upkeep
+against a build we do not control.
+
+The gap was the other failure. A *hang* never returns, so there was no error to remember, and every
+boot paid the timeout again. `run_tool` now reports a timeout as `ToolFailure(timed_out=True)`, and
+`note_hang` counts it in `<key>.timeouts`. The second timeout publishes the same marker a refusal
+writes, with the reason "compiler timed out after 30s, 2 attempts". One timeout may be a stall of the
+host, so a single one only counts. `tests/test_shader_hang_skip.py` covers the count, the publication,
+the counter reset and the timeout reporting.
 
 ## BR-20 — Runtime HLSL against Wine's `d3dcompiler_47`
 

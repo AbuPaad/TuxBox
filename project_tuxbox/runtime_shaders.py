@@ -31,6 +31,11 @@ LINK_KEY = "_".join([SOURCE_KEY] * 3)
 # A compute shader again, for a host whose waves are too narrow for its ordinary
 # translation. It has its own cache entry, so other hosts keep theirs.
 WAVE32_KEY = SOURCE_KEY + r"_w32"
+# Two timeouts in a row mean the compiler hangs on this program. One may be a
+# stall of the host, so a single timeout only counts.
+HANG_LIMIT = 2
+# Seconds one translation may take before it counts as a hang.
+TRANSLATE_TIMEOUT = 30
 REQUEST_PATTERNS = {".link": LINK_KEY, ".stencil": STENCIL_KEY, ".wave32": WAVE32_KEY, ".dxbc": SOURCE_KEY}
 
 
@@ -142,6 +147,31 @@ def remembered_reason(path):
     if len(data) > REASON_BYTES:
         return None
     return data.decode("utf-8", errors="replace").strip() or None
+
+
+def note_hang(dest, key, timeout):
+    """Count a compiler timeout, and publish a refusal once it repeats.
+
+    A translation that fails writes a reason and a marker, so the next boot skips
+    it. A translation that hangs never returns, so nothing is remembered and every
+    boot pays the timeout again. Two timeouts in a row mean a hang.
+
+    Returns the reason when this call publishes the marker, otherwise None.
+    """
+    counter = dest.with_suffix(".timeouts")
+    try:
+        attempts = int(counter.read_text(encoding="ascii").strip()) + 1
+    except (OSError, ValueError):
+        attempts = 1
+    if attempts < HANG_LIMIT:
+        counter.write_text(str(attempts), encoding="ascii")
+        return None
+    reason = f"compiler timed out after {timeout:g}s, {attempts} attempts"
+    # Publish the reason first: a visible marker may already be read.
+    dest.with_suffix(".reason").write_bytes(refusal_line(reason).encode("utf-8")[:REASON_BYTES])
+    dest.with_suffix(".unsupported").write_text(key, encoding="ascii")
+    counter.unlink(missing_ok=True)
+    return reason
 
 
 @contextmanager
@@ -366,8 +396,12 @@ def compile_request(source, key, tools, cache, session, *, remember=None, persis
             if linked:
                 run_tool([dxv, order], timeout=10)
             try:
-                run_tool([xshader, cooked, *flags, "--hlsl-out", hlsl, "--profile-out", profile], timeout=30)
+                run_tool([xshader, cooked, *flags, "--hlsl-out", hlsl, "--profile-out", profile], timeout=TRANSLATE_TIMEOUT)
             except ToolFailure as error:
+                # A hang leaves nothing behind, so it is counted and, on the second
+                # one, remembered like a refusal.
+                if error.timed_out and (hang := note_hang(dest, key, TRANSLATE_TIMEOUT)):
+                    raise ShaderRefused(hang, cached=False) from error
                 # xshader reserves this status for the in-process HLSL emitter. DXC, DXV,
                 # input parsing, tool startup and filesystem failures remain retryable.
                 if error.returncode != XSHADER_UNSUPPORTED_HLSL:

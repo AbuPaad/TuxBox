@@ -75,15 +75,22 @@ def compiler_tools():
 
 
 class ToolFailure(ValueError):
-    def __init__(self, tool, returncode, detail):
+    def __init__(self, tool, returncode, detail, *, timed_out=False):
         super().__init__(f"{Path(tool).name} failed ({returncode}): {detail}")
         self.returncode = returncode
         self.tool = Path(tool).name
+        # A tool that never returned is a hang, not a bad input. The caller
+        # decides what to do with it.
+        self.timed_out = timed_out
 
 
 def run_tool(command, *, timeout=None):
-    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                            text=True, errors="replace", timeout=timeout)
+    try:
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                text=True, errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as expiry:
+        raise ToolFailure(command[0], -1, f"timed out after {expiry.timeout:g}s",
+                          timed_out=True) from expiry
     if result.returncode:
         raise ToolFailure(command[0], result.returncode, result.stderr[-600:].strip())
 
