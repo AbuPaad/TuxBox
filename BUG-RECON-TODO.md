@@ -795,6 +795,82 @@ Actions for this tree, in order:
 
 ---
 
+---
+
+## BR-34 — A package with symlinked members is unreadable
+
+Status: `bug`, recorded 2026-11-27. Found while starting a TuxBox run from a symlink farm.
+
+`inspect.py:138-155` resolves every package member with `Path.resolve()` and then requires the result
+to stay inside the resolved package root. A member that is a symlink into another directory resolves
+outside the root, so the loader raises:
+
+```
+tuxbox: Package member leaves the package directory: 'MicrosoftGame.config'
+```
+
+The check is a sound guard against a manifest naming `..` or an absolute path. The fault is that it
+cannot tell a hostile path from a link the user made on purpose.
+
+This blocks the storage staging design in
+`docs/superpowers/specs/2026-11-26-storage-staging-design.md`. That design proposes exactly this shape.
+A package root sits on fast storage, and the large archives link in from the HDD, later through a FUSE
+view keyed by request. The loader would reject every such member.
+
+Options, cheapest first:
+
+1. Resolve the root once and compare the *link's own* parent against it, following the link only when
+   the manifest declares the path. A link inside the root then counts as a member.
+2. Keep the strict check for manifest-declared paths and add an opt-in environment variable for a
+   staging root.
+3. Drop the requirement and rely on the declared-path grammar check alone, which already refuses `..`
+   and absolute paths.
+
+Option 1 keeps the guard and unblocks staging. Whichever route you take needs a test. The test builds
+a package root with one real file and one symlink to a file outside the root.
+
+---
+
+## BR-35 — A title run needs the whole provider set built and copied beside the exe
+
+Status: `finding`, recorded 2026-11-27. Found on the first `tuxbox.py run` of the title.
+
+The launcher does not stage provider DLLs. It expects them beside the executable.
+`console_cbv.py:32` looks for `executable.with_name("d3d12_xs.dll")`, and shader preparation reads
+`build/d3d12-smoke/d3d12_xs.dll`. The package directory held the title's own DLLs and none of ours, so
+the run reached the loader and stopped there:
+
+```
+err:module:import_dll Library xmem.dll ... not found
+err:module:import_dll Library d3d12_xs.dll ... not found
+err:module:import_dll Library chad.dll ... not found
+err:module:import_dll Library xg_xs.dll ... not found
+err:module:import_dll Library XCRDAPI.dll ... not found
+err:module:import_dll Library xapu.dll ... not found
+err:module:import_dll Library AcpHal.dll ... not found
+err:module:import_dll Library Bink2Scarlett.dll ... not found
+err:module:loader_init Importing dlls for game_scarlett_master.exe failed, status c0000135
+Game exited with exit code 53 after 6.5s
+```
+
+`Bink2Scarlett.dll` sits in the package and still reported missing, because its own dependency
+`xmem.dll` was absent. The last line of a log like this names the wrong file. Read the first one.
+
+Two gaps follow.
+
+1. The tree held only six of the provider DLLs: `d3d12_xs`, `GameInput`, `tuxbox_xhttp`,
+   `XboxBvhBuilder`, `xmem`, `xcrdapi`. `chad.dll`, `xg_xs.dll`, `xapu.dll` and `AcpHal.dll` come from
+   the `route`, `graphics`, `xapu`, `xg` and `acphal` targets. No earlier step ran them.
+2. Nothing told the operator that. A run should fail with one line that names the missing provider set
+   and the build command that produces it. One line beats a page of `import_dll` errors.
+
+Wanted: `run` checks the provider set before it starts the title. Then it either copies the built DLLs
+beside the exe or names the target to build. A missing file should name itself once, not seven times.
+
+Series S profile note: `--graphics-profile series-s` failed separately, at
+`graphics_profile.py:79-83`, where `reg add` inside the `bwrap --unshare-net` clone returns nonzero and
+the error text drops the reason. Recorded with it because both faults hit the same first run.
+
 ## BR-33 — First boot attempt: it binds, opens every archive, then aborts in System Init
 
 Status: `finding`, recorded 2026-11-27 evening.
@@ -838,8 +914,8 @@ layer refused it: `HTTP connection blocked destination=submit.backtrace.io:443`.
 `AGENTS.md` warns about, and it is the reason a title runs only through a layer with egress blocked.
 
 **What this is not.** It is not a picture, and it is not a data verdict. It is a boot receipt. Every
-archive opens, every import binds, the profile is taken as asked, and the title stops in its own
-start-up.
+archive opens, every import binds, the layer runs the profile the caller asks for, and the title stops
+in its own start-up.
 
 Next steps, in order:
 
