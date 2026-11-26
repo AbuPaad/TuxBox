@@ -3,8 +3,8 @@
 
 RDNA2 returns 0 for an LDS read past the group's allocation and drops the
 write. The translated program writes each lane's input to its own word, writes
-a second value 32 KiB further on, and reads both back. The in-range word must
-keep the first value and the far read must return 0. An index that wraps
+a second value 32 KiB further on, and reads both back over its inputs. The
+in-range word must keep the first value and the far read must return 0. An index that wraps
 instead (the old `& 8191u`) overwrites the first value and reads it back.
 """
 import argparse
@@ -21,7 +21,10 @@ sys.path.insert(0, str(ROOT))
 from tools.frosty_gpu_guest import run_gpu_guest
 
 LANES = 64
-WORDS = 4 * LANES
+# compute.cpp seeds and reads back exactly this many words, and the shader's
+# `output` view starts at word START and covers 192 words.
+WORDS = 384
+START = 96
 INITIAL = "    v0 = gtid.x; v1 = gtid.y; v2 = gtid.z;"
 END = "    // 0x0028 s_endpgm"
 
@@ -31,7 +34,8 @@ def instrument(hlsl):
         raise ValueError("unexpected LDS bounds fixture")
     hlsl = hlsl.replace(INITIAL, f"    v0 = gtid.x * 4u; v1 = output[gtid.x]; v2 = output[{LANES}u + gtid.x];"
                                  " v3 = gtid.x * 4u + 0x8000u;")
-    hlsl = hlsl.replace(END, f"    output[{2 * LANES}u + gtid.x] = v4; output[{3 * LANES}u + gtid.x] = v5;\n" + END)
+    # Each lane's results overwrite its two inputs, keeping inside the 192-word view.
+    hlsl = hlsl.replace(END, f"    output[gtid.x] = v4; output[{LANES}u + gtid.x] = v5;\n" + END)
     return "RWBuffer<uint> output : register(u0);\n" + hlsl
 
 
@@ -45,8 +49,11 @@ def cases():
 
 
 def expected(near, far):
-    seed = near + far + [0x76540000 + i for i in range(2 * LANES)]
-    want = near + far + near + [0] * LANES
+    seed = [0x76540000 + i for i in range(WORDS)]
+    seed[START:START + 2 * LANES] = near + far
+    # The lane's own word keeps its value and the read past the allocation is 0.
+    want = seed.copy()
+    want[START:START + 2 * LANES] = near + [0] * LANES
     return struct.pack(f"<{WORDS}I", *seed), struct.pack(f"<{WORDS}I", *want)
 
 
