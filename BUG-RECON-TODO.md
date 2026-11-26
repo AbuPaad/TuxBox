@@ -831,6 +831,28 @@ a package root with one real file and one symlink to a file outside the root.
 
 ---
 
+## BR-37 — The runtime probe misattributes callers under Wine
+
+Status: `bug`, recorded 2026-11-27. Found while reading the caller of an unserved GDK class.
+
+`probe.rs:32-40` takes `GetModuleHandleW(null)` as the title's base and accepts the first frame `p`
+where `p >= image` and `p - image < 0x2000_0000`. That assumes modules load after the executable in one
+contiguous span.
+
+Wine does not lay modules out that way. The probe reported `from title RVA 0x1561e71e` for a call
+inside `xgameruntime.dll`, and `0x1561e71e` is past the end of the last section in
+`game_scarlett_master.exe` (`.pdata` ends near `0xb07a000`). The number is real, but it belongs to a
+neighbouring module.
+
+Wanted: check the frame against the title's own `SizeOfImage`, or enumerate modules and match the frame
+to its owner, then report module name plus offset. A caller RVA that addresses nothing is worse than no
+RVA, because it sends the reader into a section that does not exist.
+
+Worth knowing while it stands: any `from title RVA` value above about `0xb080000` on this build is
+wrong, and so is any value in a log produced under Wine.
+
+---
+
 ## BR-36 — Series S profile fails because the registry trial nests bwrap
 
 Status: `bug` with a known cause, recorded 2026-11-27.
@@ -931,6 +953,52 @@ Setup: `victory.exe` from `Belobug/VIctory-Belobug-AMD` at `81ebb7b`, under GE-P
 `p2`, `VICTORY_GAME_DIR=/home/fih/gta6-run`, `VICTORY_CACHE_DIR=/home/fih/belobug-run/cache`,
 `--console series-s`, `RUST_LOG=info`. The exe is the verified `e95020b2...` build. Process exit 3 after
 about 0.8 s.
+
+**Answered the same evening: the cause was a missing provider DLL, not a title assert.** The
+disassembly settles it. The entry wrapper calls a thunk that runs `xgameruntime`'s initialiser:
+
+```
+0x1455e2a49  mov  rcx, [0x1467e2008]      ; L"xgameruntime.dll"
+0x1455e2a52  call LoadLibraryExW
+0x1455e2a58  mov  [0x146e04ea0], rax
+0x1455e2a5f  neg  rax
+0x1455e2a62  sbb  eax, eax
+0x1455e2a64  not  eax                     ; E_FAIL when the load failed
+...
+0x145a91bdd  test eax, eax
+0x145a91bdf  js   0x145a91c21             ; int3
+```
+
+`XGameRuntimeInitialize` loads `xgameruntime.dll` by name and returns `E_FAIL` when the load fails. The
+entry stub tests for a negative result and executes `int 3`. So the trap is the missing runtime, and the
+empty `Version:` field was a red herring: the title never reached the code that fills it.
+
+The tree already said so. `docs/PROJECTSCARLETT.md:24` lists `xgameruntime` among the targets a
+ProjectScarlett run needs, and line 55 records that the executable loads it at startup by name.
+`docs/MATRIX_HISTORY.md:209` describes the same branch for another title: without the DLL, "the title
+takes the specific missing-runtime branch in WinMain".
+
+With `python build.py xgameruntime` staged beside the exe, the boot moved a step:
+
+```
+TuxBox xgameruntime: initialized
+TuxBox xgameruntime: serving XNetworking (bf2346b2)
+TuxBox xgameruntime: serving XUser (01acd177)
+TuxBox xgameruntime: serving XGame (2549f142)
+TuxBox xgameruntime: unsupported API class b884675d-b738-4a9c-815d-9a9a1e0c6c9b
+```
+
+The trap moved to `+0x5925915`, a different path. The runtime now initializes and answers three classes,
+then stops on an unserved one.
+
+**The next stop, named.** `b884675d-b738-4a9c-815d-9a9a1e0c6c9b` is `XSystemAnalytics`, whose
+`IXSystemAnalyticsImpl` inherits `IUnknown` and declares one method, `XSystemGetAnalyticsInfo`. Slot 3 is
+that method. `TUXBOX_RUNTIME_PROBE=1` shows the call as `slot 3 args 0x6ea0f600 0x1 0x6f2f6a90 ...`,
+and the title treats the `E_NOTIMPL` answer as fatal.
+
+Wanted: serve `XSystemAnalytics` from `services` and return a plausible `XSystemAnalyticsInfo` with
+`S_OK`. Analytics is telemetry, so a fixed record is honest here. That is the next code change on the
+boot path, and it needs the struct layout from the GDK reference.
 
 **What worked.**
 
