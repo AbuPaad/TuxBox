@@ -741,6 +741,57 @@ Checks so far:
 | --- | --- | --- |
 | 2026-11-27 | Victory-United, XCL, klbf-lab, VIctory-7900XTX | BR-28: the store and stride pair is host-side work. Write access is a handle property. The AMD deny list is one hash. Unordered early pipelines crash AMD's compiler |
 | 2026-11-27, second pass | Victory-United `docs/bug-journal.md`, full | BR-30: the upload and staging budget numbers, an allocator test technique, and a reverted alias experiment |
+| 2026-11-27, third pass | DexNom/VIctory, to `64bd58f5` | BR-31: interior-mip residency, per-texture mapping waits, the helper-lane quad case, the copy-back cost, and cube mip by footprint |
+
+---
+
+## BR-31 — What DexNom/VIctory changed to get every texture rendering
+
+Status: `research`, recorded 2026-11-27. Source: `DexNom/VIctory`, `main` at `64bd58f5`.
+Licence: GPL-3.0. Ideas, measurements and test shapes only.
+
+The tree reports all textures rendering. Five commits carry the work that matters to us.
+
+**1. A texture's resident bytes must handle interior-only mips (`921d8d3b`, `texture.rs`).**
+`mapped_bytes` answers how many bytes of a texture sit in resident memory. Their old code returned zero
+when neither the first nor the last page was resident. That is wrong while a texture streams in. Its
+smaller mips sit at the start of its memory, so a texture can hold only interior mips. They now walk
+the ranges and skip each missing run in one query. Their test:
+`a_texture_with_only_interior_pages_counts_its_resident_bytes`.
+
+**2. A texture refresh waits for its own mapping only (`5f4c3df4`).** A refresh that waits on any
+mapping stalls streaming behind unrelated work. Their test:
+`a_texture_refresh_waits_only_for_its_own_mapping`.
+
+**3. A pixel quad broadcast must read helper coordinates at a shared triangle edge (`921d8d3b`,
+`emit/lower.rs`).** Their `quad_pick` now takes the swizzle pattern. It returns the quad including
+pixel helpers across a triangle edge. Common broadcasts and exchanges need one native quad operation. Test: `pixel_quad_broadcast_reads_helper_coordinates_at_shared_triangle_edge`. A second
+test pins that DPP8 cannot cross a quad. This is the BR-5 fault seen from the other side.
+
+**4. Copy-back only the pages a shader marked (`cd94d353`, `940d32f6`).** Keep their first
+measurement. The world snapshotted every buffer range declared as written before each submission, then
+compared it afterwards. That cost 2.8-4.5 GB a frame. It found 98 % unchanged, and it took 0.45-0.7 s
+of a 1.5-1.7 s intro-cutscene frame. Almost all of it was one 174 MB GPU-heap buffer. The fix sets a
+bit per 64 KiB page in a bitmap for every store or atomic through an unordered view. Each host view
+heap keeps that bitmap, and the copy-back compares only the marked pages after a submission. A page
+the title also writes keeps its pre-write bytes, saved by the guard on the first write.
+
+**5. A cube map picks its mip by footprint (`921d8d3b`).** The cube SRV carries a mip count and uses
+D3D subresource order. Test: `guest_cube_gradient_selects_mip_by_footprint`.
+
+A sixth, smaller item: cached test textures were outgrowing their reserved guest memory
+(`2e01ab47`), which is the class of fault a cache needs a bound for.
+
+Actions for this tree, in order:
+
+1. Check whether our provider ever needs a resident-bytes answer for a streaming texture
+   (`runtime/d3d12/src/device/heap/*`). If it does, take finding 1 as the rule: interior mips count.
+2. Copy finding 4's measurement into BR-1 and BR-22 as the expected cost of a per-submission
+   comparison, and the page-bitmap as the shape that avoids it.
+3. Check the cube path in `tools/shader-compiler/src/hlsl/emitter/image.rs`: a cube sample with
+   gradients must choose its mip by footprint, and that is testable on this host.
+4. Copy the quad test case from finding 3 into `tests/hlsl/pixel_quad.rs`: a broadcast where the
+   helper lane is the only lane holding the value.
 
 ---
 
