@@ -343,8 +343,12 @@ pub(in crate::hlsl) fn translate_outputs_once(ex: &ShaderExtract, feeds_ps: Opti
         match wave_sum::check_control_flow(&em.insns, width) {
             Ok(guards) => em.reduction_execz_guards = guards,
             Err(reason) if em.resolve_wave32 && !requires_ballot && scan_width.is_none() => {
-                if !wave_loops::uniform_dispatch(&em) {
-                    em.wave_bounded_latches = wave_loops::bounded_latches(&em).ok_or(reason)?;
+                // A termination proof lets bounded loops drop the watchdog. Without
+                // one, uniform scalars still keep the lanes together.
+                match wave_loops::bounded_latches(&em) {
+                    Some(latches) => em.wave_bounded_latches = latches,
+                    None if wave_loops::uniform_dispatch(&em) => {}
+                    None => return Err(reason),
                 }
             }
             Err(reason) => {
