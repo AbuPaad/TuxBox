@@ -656,3 +656,47 @@ Every change in this entry can be tested on this host:
 - The GTA VI package on this host is incomplete. `game_scarlett_master.exe` is present and hashes to
   the pinned build. 29 GiB of 208.5 GiB is on disk. No run-based item can close until the download
   finishes.
+
+---
+
+## BR-28 — What the other ports found about stores, strides and hangs
+
+Status: `research`. Read on 2026-11-27 from `git.gtahub.st` mirrors and the upstream GitHub trees.
+
+Four findings bear on the open buckets.
+
+**The store and stride pair belongs to the host, not the translator.**
+`Fayberr/Victory-United` `docs/bug-journal.md`, entry "16:50–18:20, facial deformation & wrapped
+meshes (`d16` + table strides)": adds a table view-kind lookup, `SLOT_TABLE_STRIDES = 252`,
+`heap_strides`, and dynamic descriptor slot stride population in `descriptor/host.rs`. Its typed
+integer lowering branches on `VIEW_INTEGER` / `VIEW_SIGNED`, and after a regression it restricts that
+branching to `buffer_load_format_d16_*` and `buffer_store_format_d16_*`. The host reads the descriptor
+and tells the shader what kind of view it is. The shader does not infer it from the root signature.
+
+**Write access is a property of the handle.** `xcl-dev/xcl` `crates/xcl/src/gpu/dxil/shader.rs`
+models it directly: `ResClass::Uav`, `raw_uav()`, `raw_uav_coherent()`, and `annotateHandle` with the
+IsUAV property (bit 12). A program that stores gets a UAV handle for the descriptor it names. There is
+no separate "is this table a UAV" test.
+
+**The AMD deny list is one hash.** `PastiiJay/klbf-lab` `docs/klbf/skip-amd.txt` holds a single line,
+`39f0e9aeb156a61c`. That matches BR-19: one program hangs the AMD compiler, and the rest translate.
+
+**Unordered early pipelines are a dead end.** `avatarmanz/VIctory-7900XTX` `docs/findings.md` records
+"Unordered early pipelines for everything (AMD's compiler crashed)".
+
+Licences: the VIctory family is GPL-3.0-or-later, XCL is GPL-2.0. Take the shapes and the
+measurements, not the code.
+
+Consequence for the 577 refusals: marking the binding writable when a program stores through it is
+the approach two independent trees reached. That agrees with the architecture note in BR-27. It also
+shows the work spans the provider, which cannot be tested on this host.
+
+### Logs this host still needs
+
+| Bucket | What a run must record |
+| --- | --- |
+| Mesh root, 1,551 | The count of `mesh root signature missing` before and after, and how many mesh pipelines had a root at creation |
+| Stores, 577 | Per refused instruction: heap descriptor or root descriptor, the descriptor word 1 (V#), and whether any root declares the slot as UAV |
+| `IDXEN`, 129 | The descriptor stride field for every refused program, to check the recorded stride against the V# |
+| Wave reduction, 1,502 | A recorded request archive, so DXIL size and DXC time can be measured here |
+| Quad helper lanes | One shadow edge captured on RADV and on NVIDIA, same scene |
