@@ -102,6 +102,12 @@ impl<'a> Emitter<'a> {
         if self.required_wave_size == Some(64) && self.packed.as_ref().is_some_and(|p| p.lane_masks.contains(&self.cur_idx)) {
             self.touch(&hi(&s[2]));
         }
+        if m == GROUP_GATHER {
+            let idx = self.cur_idx;
+            if !self.compute_swizzle { return Err("group gather outside a group exchange".into()); }
+            if self.hoisted_swizzle != Some(idx) { self.emit_compute_swizzle(idx, ins, &[])?; }
+            return self.wv(&d, &format!("swizzle{idx}"));
+        }
         if m == "tb_reflection_prefix32" {
             return self.wv(&d, &format!("WavePrefixSum({})", r(&s[0])?));
         }
