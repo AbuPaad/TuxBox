@@ -124,10 +124,7 @@ impl<'a> Emitter<'a> {
         for channel in 0..=ins.op {
             let value = match ins.aux.imm2 {
                 // BUFFER_FORMAT_16_16_SNORM.
-                24 if channel < 2 => format!(
-                    "asuint(max(-1.0f, float(asint({packed} << {}u) >> 16) / 32767.0f))",
-                    16 - channel * 16
-                ),
+                24 if channel < 2 => snorm16_hlsl(&packed, channel),
                 24 => "0u".to_string(),
                 // BUFFER_FORMAT_2_10_10_10_UNORM.
                 50 => {
@@ -757,3 +754,26 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 }
+
+/// Divisor for a 16-bit signed normalized code. D3D divides by 32767, so the
+/// one code below -1 clamps to -1.0 instead of -1.00003.
+const SNORM16_DIVISOR: f32 = 32767.0;
+
+/// The value a 16-bit signed normalized code denotes, as D3D defines it.
+#[cfg(test)]
+fn snorm16(code: i16) -> f32 {
+    (f32::from(code) / SNORM16_DIVISOR).clamp(-1.0, 1.0)
+}
+
+/// HLSL for one channel of a BUFFER_FORMAT_16_16_SNORM dword. `packed` names
+/// the dword that holds both channels.
+fn snorm16_hlsl(packed: &str, channel: u32) -> String {
+    format!(
+        "asuint(max(-1.0f, float(asint({packed} << {}u) >> 16) / {SNORM16_DIVISOR:?}f))",
+        16 - channel * 16
+    )
+}
+
+#[cfg(test)]
+#[path = "../../tests/hlsl/buffer_snorm.rs"]
+mod buffer_snorm;

@@ -135,7 +135,7 @@ on this host.
 
 ## BR-6 — Normalized buffer codes may be one step off
 
-Status: `verify`.
+Status: `done`. Tested on 2026-11-27.
 
 cool_fox reports two defects under "Faults found". DXIL's `Log` is base 2. Normalized buffer codes
 were one step off.
@@ -149,6 +149,11 @@ Action: write a table test for the emitted SNORM conversion. Use the endpoints `
 and `127`. Compare against the RDNA2 definition. The test runs on this host:
 `cargo test --manifest-path tools/shader-compiler/Cargo.toml --target x86_64-unknown-linux-gnu`.
 
+Done on 2026-11-27 as `tests/hlsl/buffer_snorm.rs`, with the conversion moved into `snorm16_hlsl`.
+The emitter divides by 32767, which is the D3D definition, and clamps the one code below -1 to -1.0.
+The test also pins a property that reads wrong at first: the midpoint code 16384 yields 0.500015,
+not 0.5, because the range is asymmetric. The full crate suite passes, 340 tests.
+
 ## BR-7 — Ray dispatch counts: threads or groups
 
 Status: `verify`.
@@ -160,6 +165,13 @@ equivalent guard.
 
 Action: read the ray dispatch path against the console semantics. Record the answer. If the guard is
 absent, add it with a synthetic case.
+
+Answer, read on 2026-11-27. No gap. `ray_dispatch.rs:47-50` multiplies `Width`, `Height` and `Depth`
+as thread counts and compares the product against `D3D12_RAYTRACING_MAX_RAY_GENERATION_SHADER_THREADS`.
+It then passes the descriptor to `host.DispatchRays` unchanged, and the indirect path carries the same
+`D3D12_DISPATCH_RAYS_DESC`. That entry point has no group-versus-thread flag to misread, unlike
+compute, where `DISPATCH_USE_THREAD_DIMENSIONS` decides. The fork's fault sat in a path that reads a
+flag. We have no such path. No test added, because there is no behaviour to pin.
 
 ## BR-8 — The documentation says the slots are never reclaimed
 
@@ -179,7 +191,7 @@ risk visible, because the title uses far more slots than the scenario does.
 
 ## BR-9 — `python build.py lanes` fails on a clean tree
 
-Status: `open`. Reproduced on this host on 2026-11-26.
+Status: `done`. Fixed on 2026-11-27.
 
 `build.py:372` maps `lanes` to `("xmem", "d3d12", "gameinput", "lanes")`. The lanes branch then copies
 `build/bvh/XboxBvhBuilder.dll`. None of those targets builds that file. A clean checkout ends with
@@ -188,6 +200,11 @@ succeeds. Build `bvh` first and the rerun passes.
 
 Action: add `"bvh"` to the lanes target tuple. Add a test that every source in the copy list is an
 output of the listed targets.
+
+Done on 2026-11-27. `LANES_FILES` pairs each shipped file with the target that builds it.
+`LANES_TARGETS` derives from that list with lanes last, because its link step needs every provider
+library. `tests/test_build_lanes.py` covers the pairing, the omission and the order.
+`python build.py lanes` now completes on a clean tree.
 
 ## BR-10 — No descriptor-reclaim receipt for this GPU
 
@@ -221,7 +238,9 @@ and not worth it" in `docs/findings.md`.
 
 ## BR-12 — Section commits under Wine scan every committed range
 
-Status: `open`. This affects every Proton start.
+Status: `open`. This affects every Proton start. Not testable on this host: `tuxbox-xmem` does not
+build for Linux either, because the crate gates `os::windows`, so any change here is compile-checked
+only.
 
 `gmanka/victory` comments on this at `crates/victory-hle/src/modules/xmem.rs:448-452`. Under Wine a
 committed section is a sparse file, free until touched. `SEC_RESERVE` then costs one wineserver
