@@ -831,6 +831,39 @@ a package root with one real file and one symlink to a file outside the root.
 
 ---
 
+## BR-42 — The package enumerate call is not the trap
+
+Status: `finding`, recorded 2026-11-27 late, with one defensive fix landed.
+
+Read the failing path. The stack frame at `+0x293EF38` is a return address inside `0x14293ee20`, and the
+frame above it (`+0x2240EAB`) belongs to a function that first writes the literal `G:/` before calling.
+So the failure happens on the package-drive path, after the enumeration call returns.
+
+Then the comparison against a tree that reaches the menu:
+
+| | `XPackageEnumeratePackages` |
+| --- | --- |
+| `Belobug/VIctory-Belobug-AMD` | returns `S_OK` and never invokes the callback, under the comment "packages enumerated: none" |
+| this tree, before | returned `E_POINTER` when the callback was null |
+| this tree, now | returns `S_OK` either way, and logs whether a callback arrived |
+
+The null-callback branch was a real defect worth removing, and it has two tests. It is **not the cause of
+the trap**: the run reports `called package_enumerate kind 1 scope 0 callback set`, so the title passes a
+callback and our old branch never fired. The trap stays at `+0x1CE6E13` from `+0x293EF38`, exit 3 after 6.0 s.
+
+So an empty enumeration is acceptable to this title, as the sibling proves. The failure lies later in the
+same `G:/` path. Next read is `0x14293ee20` and its caller `0x142236c90`:
+
+- `0x142236c90` writes `G:/` into `0x1474530b0` and calls `0x140643cd0`, then calls `0x14293ee20`, and the
+  frame after that call is the one in the trap stack.
+- `0x14293ee20` calls `0x1455db994` and copies a record from `[rdi+0x08]`, which reads like exception
+  construction rather than a direct check.
+
+Wanted next: name the object at `0x147f00510` that `0x142236cf6` reads, since the code immediately after
+the failing call dereferences it and then calls `0x14293f1e0` on `[rbx+0x2b0]`.
+
+---
+
 ## BR-41 — CGBJ's latest commits: three things worth taking
 
 Status: `research`, recorded 2026-11-27. Source: `cesarzxk/CGBJ-trustno1-VIctory-NVIDIA` on the mirror
@@ -902,7 +935,7 @@ recorded in BR-12 and BR-26, so the number transfers and the mechanism does not.
 
 Neither crate runs its tests on a Linux host. Verification was
 `cargo check --target x86_64-pc-windows-msvc` plus one boot. The log line proves the staging floor. The
-admission gate compiles, and `Upload::record` calls it, but no run has reached that call. The run still
+admission gate compiles, and `Upload::record` calls it, but no run reaches that call yet. The run still
 stops before the first texture upload, so the line waits for it.
 
 Licence: GPL-3.0-or-later trees, Apache-2.0 here. Mechanisms and measurements only, reimplemented, credited.

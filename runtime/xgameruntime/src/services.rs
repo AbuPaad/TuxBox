@@ -553,14 +553,19 @@ pub(super) extern "system" fn package_enumerate(
     _context: *mut c_void,
     callback: *mut c_void,
 ) -> i32 {
+    // No content package is installed, so the callback is never invoked. The
+    // title passes a null callback when it only wants the count, so a null
+    // there is success rather than a pointer fault (BR-42).
     super::report(format_args!(
-        "called package_enumerate kind {kind} scope {scope}"
+        "called package_enumerate kind {kind} scope {scope} callback {}",
+        if callback.is_null() { "none" } else { "set" }
     ));
-    if callback.is_null() {
-        return POINTER;
-    }
     OK
 }
+
+#[cfg(test)]
+#[path = "tests/package_enumerate.rs"]
+mod package_tests;
 
 /// XUserGetGamertag(user, component, size, buffer, used) on interface cef4fac0.
 pub(super) unsafe extern "system" fn user_gamertag(
