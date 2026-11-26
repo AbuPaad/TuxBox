@@ -188,3 +188,72 @@ fn distinguishes_saved_coverage_from_scalar_bits() {
     assert!(!guards_expansion(&code, 2));
     assert!(!saved_exec(&code, 4));
 }
+
+/// `ds_swizzle_b32` with QDMode, broadcasting lane 1 to the whole quad.
+const DS_SWIZZLE_LANE1: u32 = 0xd8d4_8055;
+/// The swizzle reads and writes v1.
+const DS_SWIZZLE_V1: u32 = 0x0100_0001;
+const ENDPGM: u32 = 0xbf81_0000;
+
+/// A pixel quad read must include helper lanes. On AMD a helper lane holds a
+/// value and takes part in `QuadReadLaneAt`, but host wave intrinsics skip helper
+/// lanes, so a read placed inside the emulated EXEC predicate returns another
+/// lane's value. That is the reported square hole at a shadow edge.
+#[test]
+fn swizzle_reads_the_helping_lane_outside_the_exec_predicate() {
+    let translated = super::super::translate(&pixel(&[
+        DS_SWIZZLE_LANE1,
+        DS_SWIZZLE_V1,
+        ENDPGM,
+    ]))
+    .unwrap();
+    let read = translated
+        .hlsl
+        .lines()
+        .find(|line| line.contains("QuadReadLaneAt(") && line.contains(", 1)"))
+        .unwrap_or_else(|| {
+            let tail: Vec<&str> = translated.hlsl.lines().rev().take(6).collect();
+            panic!("no quad read; tail: {tail:?}")
+        });
+    assert!(
+        !read.contains("exec_lo"),
+        "the read sits inside the EXEC predicate: {read}"
+    );
+    assert!(
+        !translated.hlsl.contains("WaveReadLaneAt("),
+        "the pixel read must use a quad intrinsic, not a wave read"
+    );
+}
+
+/// A swizzle pattern that is not a broadcast reads the whole quad and indexes it.
+#[test]
+fn swizzle_with_a_rotation_pattern_indexes_all_four_lanes() {
+    let translated = super::super::translate(&pixel(&[
+        0xd8d4_801b,
+        DS_SWIZZLE_V1,
+        ENDPGM,
+    ]))
+    .unwrap();
+    let hlsl = &translated.hlsl;
+    for lane in 0..4 {
+        assert!(
+            hlsl.contains(&format!("QuadReadLaneAt(v1, {lane})")),
+            "no read of lane {lane}: {}",
+            hlsl.lines()
+                .filter(|l| l.contains("QuadReadLaneAt"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    assert!(hlsl.contains("tb_quad"), "{hlsl}");
+}
+
+/// Without the QDMode bit the pattern cannot be expressed as a quad read.
+#[test]
+fn swizzle_without_qdmode_stays_refused() {
+    let error = match super::super::translate(&pixel(&[0xd8d4_0055, DS_SWIZZLE_V1, ENDPGM])) {
+        Ok(translated) => panic!("translated: {}", translated.hlsl),
+        Err(error) => error,
+    };
+    assert!(error.contains("ds_swizzle without QDMode unsupported"), "{error}");
+}

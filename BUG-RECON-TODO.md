@@ -120,7 +120,7 @@ relative to submission, and what the CPU sees between copies. This work is not a
 
 ## BR-5 — Quad and helper-lane reads on AMD
 
-Status: `verify`.
+Status: `done` for the synthetic part, `verify` for the visual part. Updated 2026-11-27.
 
 cool_fox reports square holes and dashed shadow edges. Its cause is pixel shaders that read their
 quad's neighbours with wave reads. On AMD, helper lanes take no part in them. See
@@ -132,6 +132,23 @@ We have quad support: `uses_quad` at `tools/shader-compiler/src/hlsl.rs:328-329`
 Action: on a RADV run, check shadow map edges for square holes with `TUXBOX_WAVE_DEBUG=1`. Compare
 the same scene on NVIDIA. Put a synthetic reproduction in the shader compiler tests. Those tests run
 on this host.
+
+Done on 2026-11-27, in two parts.
+
+The synthetic reproduction exists: `tests/hlsl/pixel_quad.rs` now covers `ds_swizzle_b32` with
+QDMode, which is the instruction a shadow-edge neighbour read compiles to. Three tests:
+
+- a broadcast pattern reads one lane with `QuadReadLaneAt`. That line carries no `exec_lo` predicate,
+  so a helper lane's value participates.
+- a rotation pattern reads all four lanes and indexes them by the quad lane.
+- a pattern without the QDMode bit stays refused with "ds_swizzle without QDMode unsupported".
+
+A host wave intrinsic skips helper lanes. AMD includes them in the quad read only when the read
+sits outside the emulated EXEC mask. The emitter already places it outside. That is now pinned
+rather than assumed.
+
+Still open: the visual comparison needs a RADV run and an NVIDIA run on the same scene. No test on
+this host can replace it.
 
 ## BR-6 — Normalized buffer codes may be one step off
 
