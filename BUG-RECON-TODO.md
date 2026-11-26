@@ -908,6 +908,17 @@ Two gaps follow.
 Wanted: `run` checks the provider set before it starts the title. Then it either copies the built DLLs
 beside the exe or names the target to build. A missing file should name itself once, not seven times.
 
+The build command, since `build.py` takes one target at a time and refuses a list:
+
+```sh
+for t in route graphics acphal xapu xg; do python build.py "$t" || break; done
+```
+
+It writes `build/xapu/chad.dll`, `build/xg-provider/xg_xs.dll`, `build/xapu/xapu.dll` and
+`build/acphal/AcpHal.dll`. Copy those, plus `build/d3d12-smoke/d3d12_xs.dll`, `build/lanes/xmem.dll`,
+`build/lanes/tuxbox_xhttp.dll`, `build/xcrdapi/xcrdapi.dll` and `build/lanes/XboxBvhBuilder.dll`,
+beside the exe. Keep a `.tuxbox-orig` copy of any package file that a provider replaces.
+
 Series S profile note: `--graphics-profile series-s` failed separately, at
 `graphics_profile.py:79-83`, where `reg add` inside the `bwrap --unshare-net` clone returns nonzero and
 the error text drops the reason. Recorded with it because both faults hit the same first run.
