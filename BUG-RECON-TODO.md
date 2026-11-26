@@ -864,12 +864,11 @@ movups xmm0, [rax]              ; copies 144 bytes FROM THE RETURN VALUE
 ```
 
 So the method returns a **pointer** to the record, not a status. The first implementation returned
-`S_OK`, which is zero, and the title dereferenced that null pointer. Ten tests cover it. They check the
-size, the terminators, the buffer choice and a null answer, and they check that the returned pointer is
-the buffer the caller passed.
+`S_OK`, which is zero, and the title dereferenced that null pointer. Ten tests cover it. They check the size, the terminators, the buffer choice and a null answer. They
+also check that the returned pointer is the buffer the caller passed.
 
-**What this did not fix.** The fatal trap stays at `+0x5925915`, the address it also reached while
-analytics was unsupported. Analytics was a logged unknown, not the cause of the abort. The earlier
+**What this did not fix.** The fatal trap stays at `+0x5925915`, the address it also reached while the
+runtime gave no answer for analytics. Analytics was a logged unknown, not the cause of the abort. The earlier
 reading that made it the next stop was wrong. This entry records that so the same road is not walked
 twice.
 
