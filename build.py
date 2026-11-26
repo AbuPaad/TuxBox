@@ -13,6 +13,18 @@ ROOT = Path(__file__).resolve().parent
 OUTPUT = ROOT / "build"
 TARGETS = ("bvh", "route", "graphics", "xmem", "acphal", "xapu", "xgameruntime", "xcrdapi", "dxc-utils", "xg", "gameinput",
            "d3d12", "lanes")
+# Every file the lanes package ships, with the target that builds it. The lanes
+# branch copies these, so a target missing here fails at the last step of a
+# clean build, after all the expensive work has succeeded.
+LANES_FILES = (
+    ("lanes", "lanes-obj/lanes.exe"),
+    ("xmem", "xmem-smoke/xmem.dll"),
+    ("xmem", "xmem-smoke/tuxbox_xhttp.dll"),
+    ("d3d12", "d3d12-smoke/d3d12_xs.dll"),
+    ("bvh", "bvh/XboxBvhBuilder.dll"),
+    ("gameinput", "gameinput/GameInput.dll"),
+)
+LANES_TARGETS = tuple(dict.fromkeys([target for target, _ in LANES_FILES if target != "lanes"])) + ("lanes",)
 # rustc --print native-static-libs for the Windows MSVC target with +crt-static.
 RUST_STD_LIBS = ("kernel32.lib", "ntdll.lib", "userenv.lib", "ws2_32.lib", "dbghelp.lib", "synchronization.lib",
                  "/defaultlib:libcmt")
@@ -339,9 +351,10 @@ def build_target(tools, target, dxc, d3d12_reference=None):
         tools.link(objects / "lanes.exe", course, screen, controls, game, selftest, xmem / "xmem.lib",
                    d3d / "d3d12_xs.lib",
                    gameinput / "guest-gameinput.lib", "onecore_apiset.lib", "/nodefaultlib:kernel32.lib")
-        for source in (objects / "lanes.exe", xmem / "xmem.dll", xmem / "tuxbox_xhttp.dll", d3d / "d3d12_xs.dll",
-                       OUTPUT / "bvh/XboxBvhBuilder.dll", gameinput / "GameInput.dll", src / "MicrosoftGame.config"):
+        for _, relative in LANES_FILES:
+            source = OUTPUT / relative
             shutil.copyfile(source, package / source.name)
+        shutil.copyfile(src / "MicrosoftGame.config", package / "MicrosoftGame.config")
         print(package / "MicrosoftGame.config", flush=True)
 
 
@@ -369,7 +382,7 @@ def main():
         if args.target == "xg":
             targets = ("xmem", "xg")
         if args.target == "lanes":
-            targets = ("xmem", "d3d12", "gameinput", "lanes")
+            targets = LANES_TARGETS
         dxc = find_dxc(args.dxc) if "d3d12" in targets else None
         tools = Toolchain()
         for target in targets:
