@@ -875,7 +875,7 @@ numbers.
 
 **Architecture, worth taking.** Every fork intercepts `LoadLibrary` by name and serves the Xbox DLLs
 in-process. We ship real DLLs and let the loader find them. Both work. Theirs turns a missing or failing
-stub into a *silent* HLE answer instead of a `GetProcAddress` failure, and it removes the need to match
+stub into a *silent* HLE answer instead of a `GetProcAddress` failure. It also removes the need to match
 each flat export's ABI exactly. That is why their boots pass faults that stop ours at the loader.
 
 `Kelvaroq` also records that the title's console-model function returns 7 for Series X and 6 for Series S.
