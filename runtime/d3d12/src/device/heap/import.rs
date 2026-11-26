@@ -23,9 +23,25 @@ pub(super) fn trace_import_failure(source: &'static str, api: &'static str, size
 
 // This holder is also the key for the weak single-page import cache. Its
 // last native resource releases both the heap reference and the VA pin.
+// Field order is load-bearing: `native` must drop before `_shadow` unmaps.
 pub(in super::super) struct ImportedHeap {
     pub(super) native: ID3D12Heap,
     pub(super) _pin: ImportPin,
+    _shadow: Option<Arc<super::shadow::ShadowPages>>,
+}
+
+impl ImportedHeap {
+    pub(super) fn direct(native: ID3D12Heap, pin: ImportPin) -> Self {
+        Self { native, _pin: pin, _shadow: None }
+    }
+
+    pub(super) fn shadowed(
+        native: ID3D12Heap,
+        pin: ImportPin,
+        shadow: Arc<super::shadow::ShadowPages>,
+    ) -> Self {
+        Self { native, _pin: pin, _shadow: Some(shadow) }
+    }
 }
 
 // Slot 44 places a tiled resource at a title-selected virtual address. An
@@ -63,7 +79,7 @@ pub(in super::super) fn import_buffer_with_heap(
     // A guest can place thousands of tiny resources in one multi-GiB XMem
     // reservation. Pin only the pages needed by this resource on the adapter.
     let heap = if let Ok(sized) = device.native.cast::<ID3D12Device13>() {
-        device.state.page_pools.import(&sized, base, size, pin, source)?
+        device.state.page_pools.import(&device.native, &sized, base, size, pin, source)?
     } else {
         let mut region = MEMORY_BASIC_INFORMATION::default();
         if unsafe { VirtualQuery(Some(base as _), &mut region, size_of_val(&region)) } == 0
@@ -71,11 +87,16 @@ pub(in super::super) fn import_buffer_with_heap(
             return Err(E_NOTIMPL.into());
         }
         let host: ID3D12Device3 = device.native.cast()?;
-        let native = unsafe { host.OpenExistingHeapFromAddress(region.AllocationBase) }.map_err(|error| {
-            trace_import_failure(source, "legacy", size, error.code());
-            error
-        })?;
-        Arc::new(ImportedHeap { native, _pin: pin })
+        if super::shadow::contains_mapped_pages(base, size)
+            && !device.state.page_pools.supports_mapped_import(&device.native)
+        {
+            super::shadow::open_shadow_legacy(&host, base, size, pin, source)?
+        } else {
+            match unsafe { host.OpenExistingHeapFromAddress(region.AllocationBase) } {
+                Ok(native) => Arc::new(ImportedHeap::direct(native, pin)),
+                Err(error) => super::shadow::try_open_legacy(&host, base, size, pin, source, error)?,
+            }
+        }
     };
     let mut resource = None;
     unsafe { device.native.CreatePlacedResource(&heap.native, offset, &host_desc, state, None, &mut resource)? };
