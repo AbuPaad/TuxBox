@@ -1,25 +1,55 @@
 //! Survey of runtime API classes TuxBox does not implement yet. Each class
 //! answers QueryApiImpl with an interface whose every method logs its slot,
 //! the first five integer arguments and the caller, then returns E_NOTIMPL.
-//! The six identified classes are served by `services` (slots it implements)
-//! by default; TUXBOX_RUNTIME_SERVICES=0 withholds them. TUXBOX_RUNTIME_PROBE=1
-//! also exposes the unidentified class.
+//! Seven identified classes are served by `services` (slots it implements) by
+//! default; TUXBOX_RUNTIME_SERVICES=0 withholds them. TUXBOX_RUNTIME_PROBE=1
+//! also exposes the class that is still unidentified.
 use super::{NOT_IMPLEMENTED, Object, Slot, report};
 use std::sync::atomic::AtomicU32;
 use windows_sys::core::GUID;
 
 pub(super) const CLASSES: [(GUID, &str); 10] = [
-    (GUID::from_u128(0x01acd177_91f9_4763_a38e_ccbb55ce32e0), "XUser"),
-    (GUID::from_u128(0x973a344e_24bf_4d0f_8457_56c534892b29), "XGame"),
-    (GUID::from_u128(0xaf406016_e850_4aa8_a88d_2f3dcb9dac7e), "XPackage"),
-    (GUID::from_u128(0xf4faf4d4_2d04_4fce_b3e0_474a713a3e84), "XPersistentLocalStorage"),
-    (GUID::from_u128(0x37e56907_2f10_41e8_b72f_36edb185331a), "XNetworking"),
-    (GUID::from_u128(0x03f0fe74_fdd9_4e5c_b630_f9339c47acc5), "XDisplay"),
-    (GUID::from_u128(0x3e241977_6237_41e9_8559_102c2d9983f1), "Unknown3e241977"),
-    (GUID::from_u128(0xb884675d_b738_4a9c_815d_9a9a1e0c6c9b), "Unknownb884675d"),
-    (GUID::from_u128(0x704c3f58_e629_4cc2_b197_30511b996fe2), "XGameSave"),
+    (
+        GUID::from_u128(0x01acd177_91f9_4763_a38e_ccbb55ce32e0),
+        "XUser",
+    ),
+    (
+        GUID::from_u128(0x973a344e_24bf_4d0f_8457_56c534892b29),
+        "XGame",
+    ),
+    (
+        GUID::from_u128(0xaf406016_e850_4aa8_a88d_2f3dcb9dac7e),
+        "XPackage",
+    ),
+    (
+        GUID::from_u128(0xf4faf4d4_2d04_4fce_b3e0_474a713a3e84),
+        "XPersistentLocalStorage",
+    ),
+    (
+        GUID::from_u128(0x37e56907_2f10_41e8_b72f_36edb185331a),
+        "XNetworking",
+    ),
+    (
+        GUID::from_u128(0x03f0fe74_fdd9_4e5c_b630_f9339c47acc5),
+        "XDisplay",
+    ),
+    (
+        GUID::from_u128(0x3e241977_6237_41e9_8559_102c2d9983f1),
+        "Unknown3e241977",
+    ),
+    (
+        GUID::from_u128(0xb884675d_b738_4a9c_815d_9a9a1e0c6c9b),
+        "XSystemAnalytics",
+    ),
+    (
+        GUID::from_u128(0x704c3f58_e629_4cc2_b197_30511b996fe2),
+        "XGameSave",
+    ),
     // XUser's gamertag interface (IID cef4fac0); selected by IID, not class.
-    (GUID::from_u128(0xcef4fac0_7676_4a94_a119_4c43f9eb5b74), "XUserGamertag"),
+    (
+        GUID::from_u128(0xcef4fac0_7676_4a94_a119_4c43f9eb5b74),
+        "XUserGamertag",
+    ),
 ];
 
 /// Interfaces chosen by IID within a class.
@@ -34,16 +64,29 @@ fn caller_rva() -> usize {
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     let image = unsafe { GetModuleHandleW(core::ptr::null()) } as usize;
     let mut frames = [core::ptr::null_mut(); 8];
-    let count = unsafe { RtlCaptureStackBackTrace(0, 8, frames.as_mut_ptr(), core::ptr::null_mut()) } as usize;
-    frames[..count].iter().map(|&p| p as usize)
-        .find(|&p| p >= image && p - image < 0x2000_0000).map_or(0, |p| p - image)
+    let count =
+        unsafe { RtlCaptureStackBackTrace(0, 8, frames.as_mut_ptr(), core::ptr::null_mut()) }
+            as usize;
+    frames[..count]
+        .iter()
+        .map(|&p| p as usize)
+        .find(|&p| p >= image && p - image < 0x2000_0000)
+        .map_or(0, |p| p - image)
 }
 
 unsafe extern "system" fn method<const K: usize, const N: usize>(
-    _this: &Object, a: usize, b: usize, c: usize, d: usize, e: usize,
+    _this: &Object,
+    a: usize,
+    b: usize,
+    c: usize,
+    d: usize,
+    e: usize,
 ) -> i32 {
-    report(format_args!("probe {} slot {N} args {a:#x} {b:#x} {c:#x} {d:#x} {e:#x} from title RVA {:#x}",
-        CLASSES[K].1, caller_rva()));
+    report(format_args!(
+        "probe {} slot {N} args {a:#x} {b:#x} {c:#x} {d:#x} {e:#x} from title RVA {:#x}",
+        CLASSES[K].1,
+        caller_rva()
+    ));
     NOT_IMPLEMENTED
 }
 
@@ -61,12 +104,25 @@ macro_rules! table {
 }
 
 macro_rules! service {
-    ($f:path) => { Slot($f as *const ()) };
+    ($f:path) => {
+        Slot($f as *const ())
+    };
 }
 
 static TABLES: [[Slot; 64]; 10] = {
     use super::services::*;
-    let mut t = [table!(0), table!(1), table!(2), table!(3), table!(4), table!(5), table!(6), table!(7), table!(8), table!(9)];
+    let mut t = [
+        table!(0),
+        table!(1),
+        table!(2),
+        table!(3),
+        table!(4),
+        table!(5),
+        table!(6),
+        table!(7),
+        table!(8),
+        table!(9),
+    ];
     // XUser
     t[0][3] = service!(user_duplicate);
     t[0][4] = service!(user_close);
@@ -111,6 +167,8 @@ static TABLES: [[Slot; 64]; 10] = {
     t[8][27] = service!(super::save::submit);
     t[8][28] = service!(super::save::submit_async);
     t[8][29] = service!(super::save::status_result);
+    // XSystemAnalytics: XSystemGetAnalyticsInfo, the interface's only method.
+    t[7][3] = service!(super::services::system_analytics_info);
     t[0][33] = service!(user_register_change);
     t[0][34] = service!(user_unregister_change);
     // XGame
@@ -136,7 +194,7 @@ static TABLES: [[Slot; 64]; 10] = {
     t
 };
 
-/// Classes with offline services; the last (unidentified) one is probe-only.
+/// Classes with offline services. XAccessibility (6) stays probe-only.
 /// TUXBOX_RUNTIME_SERVICES=0 withholds all of them; a comma-separated list of
 /// class names (for example `XUser,XGame`) offers only those.
 pub(super) fn available(index: usize) -> bool {
@@ -145,13 +203,21 @@ pub(super) fn available(index: usize) -> bool {
         Ok(list) if list == "0" => false,
         Ok(list) => list.split(',').any(|name| name.trim() == CLASSES[index].1),
     };
-    (index < 6 || index == 8 || index == GAMERTAG) && selected || enabled()
+    (index < 6 || index == 7 || index == 8 || index == GAMERTAG) && selected || enabled()
 }
 pub(super) static OBJECTS: [super::ProbeObject; 10] = {
     let mut i = 0;
-    let mut out = [const { super::ProbeObject { vtable: &TABLES[0], references: AtomicU32::new(0) } }; 10];
+    let mut out = [const {
+        super::ProbeObject {
+            vtable: &TABLES[0],
+            references: AtomicU32::new(0),
+        }
+    }; 10];
     while i < 10 {
-        out[i] = super::ProbeObject { vtable: &TABLES[i], references: AtomicU32::new(0) };
+        out[i] = super::ProbeObject {
+            vtable: &TABLES[i],
+            references: AtomicU32::new(0),
+        };
         i += 1;
     }
     out

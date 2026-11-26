@@ -105,7 +105,10 @@ pub(super) fn attach() {
             continue;
         };
         if let Err(error) = mount(letter, &path, replace) {
-            let message = format!("TuxBox xgameruntime: could not attach {}: ({error})\n\0", char::from(letter));
+            let message = format!(
+                "TuxBox xgameruntime: could not attach {}: ({error})\n\0",
+                char::from(letter)
+            );
             unsafe { OutputDebugStringA(message.as_ptr()) };
         }
     }

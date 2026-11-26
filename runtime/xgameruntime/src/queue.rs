@@ -356,24 +356,47 @@ pub(super) extern "system" fn terminate(
 
 /// Run `callback(context, false)` on the completion port of a queue handle,
 /// or of the process queue for a null handle (XAsyncBlock semantics).
-pub(super) unsafe fn submit_completion(handle: Handle, context: *mut c_void, callback: Callback) -> i32 {
+pub(super) unsafe fn submit_completion(
+    handle: Handle,
+    context: *mut c_void,
+    callback: Callback,
+) -> i32 {
     unsafe { submit_port(handle, 1, context, callback, Duration::ZERO) }
 }
 
 /// As `submit_completion`, due after `delay`.
-pub(super) unsafe fn submit_completion_after(handle: Handle, context: *mut c_void, callback: Callback, delay: Duration) -> i32 {
+pub(super) unsafe fn submit_completion_after(
+    handle: Handle,
+    context: *mut c_void,
+    callback: Callback,
+    delay: Duration,
+) -> i32 {
     unsafe { submit_port(handle, 1, context, callback, delay) }
 }
 
 /// Queue `callback(context, false)` on port 0 (work) or 1 (completion).
-pub(super) unsafe fn submit_port(handle: Handle, port: usize, context: *mut c_void, callback: Callback, delay: Duration) -> i32 {
-    let queue = if handle == 0 { Some(Arc::clone(&PROCESS_QUEUE)) } else { lookup(handle) };
+pub(super) unsafe fn submit_port(
+    handle: Handle,
+    port: usize,
+    context: *mut c_void,
+    callback: Callback,
+    delay: Duration,
+) -> i32 {
+    let queue = if handle == 0 {
+        Some(Arc::clone(&PROCESS_QUEUE))
+    } else {
+        lookup(handle)
+    };
     let Some(q) = queue else { return INVALID };
     let mut s = lock(&q.state);
     if !matches!(s.ending, Ending::Open) {
         return ABORT;
     }
-    let job = Job { context: context as usize, callback, due: Instant::now() + delay };
+    let job = Job {
+        context: context as usize,
+        callback,
+        due: Instant::now() + delay,
+    };
     // Same delivery rules as submit_delayed.
     if q.modes[port] == IMMEDIATE && delay.is_zero() {
         s.ports[port].running += 1;
@@ -395,12 +418,23 @@ pub(super) unsafe fn submit_port(handle: Handle, port: usize, context: *mut c_vo
 static PORTS: LazyLock<Mutex<HashMap<usize, (Arc<Queue>, u32)>>> = LazyLock::new(Default::default);
 
 /// XTaskQueueGetPort (threading slot 14).
-pub(super) unsafe extern "system" fn get_port(_: &Object, handle: Handle, port: u32, out: *mut usize) -> i32 {
+pub(super) unsafe extern "system" fn get_port(
+    _: &Object,
+    handle: Handle,
+    port: u32,
+    out: *mut usize,
+) -> i32 {
     if out.is_null() {
         return POINTER;
     }
-    let queue = if handle == 0 { Some(Arc::clone(&PROCESS_QUEUE)) } else { lookup(handle) };
-    let (Some(q), true) = (queue, port <= 1) else { return INVALID };
+    let queue = if handle == 0 {
+        Some(Arc::clone(&PROCESS_QUEUE))
+    } else {
+        lookup(handle)
+    };
+    let (Some(q), true) = (queue, port <= 1) else {
+        return INVALID;
+    };
     let mut ports = lock(&PORTS);
     let id = 0x5000_0000 + ports.len() * 2 + port as usize;
     ports.insert(id, (q, port));
@@ -409,17 +443,26 @@ pub(super) unsafe extern "system" fn get_port(_: &Object, handle: Handle, port: 
 }
 
 /// XTaskQueueCreateComposite (threading slot 13).
-pub(super) unsafe extern "system" fn create_composite(_: &Object, work: usize, completion: usize, out: *mut Handle) -> i32 {
+pub(super) unsafe extern "system" fn create_composite(
+    _: &Object,
+    work: usize,
+    completion: usize,
+    out: *mut Handle,
+) -> i32 {
     if out.is_null() {
         return POINTER;
     }
     unsafe { out.write(0) };
     let ports = lock(&PORTS);
-    let (Some((work_queue, _)), Some((completion_queue, _))) = (ports.get(&work), ports.get(&completion)) else {
+    let (Some((work_queue, _)), Some((completion_queue, _))) =
+        (ports.get(&work), ports.get(&completion))
+    else {
         return INVALID;
     };
     if !Arc::ptr_eq(work_queue, completion_queue) {
-        super::report(format_args!("composite queue from ports of two queues uses the work queue for both"));
+        super::report(format_args!(
+            "composite queue from ports of two queues uses the work queue for both"
+        ));
     }
     let queue = Arc::clone(work_queue);
     drop(ports);

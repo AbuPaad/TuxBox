@@ -5,6 +5,9 @@ mod queue;
 mod save;
 mod save_store;
 mod services;
+// The title's scratch directory handling is Win32 only; gating it keeps the
+// crate's tests building on a Linux host.
+#[cfg(windows)]
 mod title_temp;
 
 use std::ffi::{c_char, c_void};
@@ -38,8 +41,11 @@ extern "system" fn InitializeApiImpl(build: u32, revision: u32) -> i32 {
 
 #[unsafe(no_mangle)]
 extern "system" fn InitializeApiImplEx(_build: u32, _revision: u32, _flags: u64) -> i32 {
-    static STORAGE: std::sync::Once = std::sync::Once::new();
-    STORAGE.call_once(title_temp::attach);
+    #[cfg(windows)]
+    {
+        static STORAGE: std::sync::Once = std::sync::Once::new();
+        STORAGE.call_once(title_temp::attach);
+    }
     if INITIALIZATIONS.fetch_add(1, Ordering::AcqRel) == 0 {
         unsafe { OutputDebugStringA(c"TuxBox xgameruntime: initialized\n".as_ptr().cast()) };
     }
@@ -81,19 +87,30 @@ unsafe extern "system" fn QueryApiImpl(
         return unsafe { query(&SYSTEM_OBJECT, iid, out) };
     }
     if !same(class, &THREADING) {
-        let by_interface = probe::CLASSES.iter().position(|(c, _)| same(c, iid))
+        let by_interface = probe::CLASSES
+            .iter()
+            .position(|(c, _)| same(c, iid))
             .filter(|&i| i == probe::GAMERTAG);
-        if let Some(index) = by_interface.or_else(|| probe::CLASSES.iter().position(|(c, _)| same(c, class)))
+        if let Some(index) =
+            by_interface.or_else(|| probe::CLASSES.iter().position(|(c, _)| same(c, class)))
             && probe::available(index)
         {
             // report() dedups, so each served class is logged once.
-            report(format_args!("serving {} (interface {})", probe::CLASSES[index].1, guid_text(iid)));
+            report(format_args!(
+                "serving {} (interface {})",
+                probe::CLASSES[index].1,
+                guid_text(iid)
+            ));
             let object = &probe::OBJECTS[index];
             add_ref(unsafe { &*ptr::from_ref(object).cast::<Object>() });
             unsafe { out.write(ptr::from_ref(object).cast_mut().cast()) };
             return OK;
         }
-        report(format_args!("unsupported API class {} (interface {})", guid_text(class), guid_text(iid)));
+        report(format_args!(
+            "unsupported API class {} (interface {})",
+            guid_text(class),
+            guid_text(iid)
+        ));
         return NO_INTERFACE;
     }
     unsafe { query(&THREAD_OBJECT, iid, out) }
@@ -117,7 +134,11 @@ struct ProbeObject {
     references: AtomicU32,
 }
 
-unsafe extern "system" fn query_probe(this: &Object, _iid: *const GUID, out: *mut *mut c_void) -> i32 {
+unsafe extern "system" fn query_probe(
+    this: &Object,
+    _iid: *const GUID,
+    out: *mut *mut c_void,
+) -> i32 {
     if out.is_null() {
         return POINTER;
     }
@@ -173,7 +194,10 @@ extern "system" fn unsupported_method<const SYSTEM: bool, const N: usize>(_: &Ob
     if !reported.contains(&(SYSTEM, N)) {
         reported.push((SYSTEM, N));
         drop(reported);
-        report(format_args!("unsupported {} method slot {N}", if SYSTEM { "XSystem" } else { "XThreading" }));
+        report(format_args!(
+            "unsupported {} method slot {N}",
+            if SYSTEM { "XSystem" } else { "XThreading" }
+        ));
     }
     NOT_IMPLEMENTED
 }
@@ -184,8 +208,10 @@ macro_rules! unsupported_methods {
 
 fn guid_text(g: &GUID) -> String {
     let d = g.data4;
-    format!("{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        g.data1, g.data2, g.data3, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7])
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        g.data1, g.data2, g.data3, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]
+    )
 }
 
 /// Report each distinct unsupported request once (bounded).
@@ -200,7 +226,17 @@ fn report(text: std::fmt::Arguments<'_>) {
     seen.push(line.clone());
     drop(seen);
     let message = format!("{line}\n\0");
-    unsafe { OutputDebugStringA(message.as_ptr()) };
+    // The guest reports through the debugger on Windows. A Linux host only
+    // links the tests, so write the same line to standard error there.
+    #[cfg(windows)]
+    unsafe {
+        OutputDebugStringA(message.as_ptr())
+    };
+    #[cfg(not(windows))]
+    {
+        let _ = &message;
+        eprintln!("{line}");
+    }
 }
 extern "system" fn idle_thread(_: &Object) {} // No guest thread is designated time-sensitive.
 static THREAD_TABLE: [Slot; 32] = {
@@ -270,4 +306,3 @@ static SYSTEM_OBJECT: Object = Object {
     vtable: &SYSTEM_TABLE,
     references: AtomicU32::new(0),
 };
-

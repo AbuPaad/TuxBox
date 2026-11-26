@@ -23,13 +23,38 @@ fn names_cannot_leave_the_root() {
 fn round_trip_replace_delete() {
     let r = root("rt");
     assert!(container(&r, "Player").is_none());
-    commit(&r, "Player", "Slot 1", &[("a".into(), Some(vec![1, 2, 3])), ("b.c".into(), Some(vec![]))]).unwrap();
+    commit(
+        &r,
+        "Player",
+        "Slot 1",
+        &[
+            ("a".into(), Some(vec![1, 2, 3])),
+            ("b.c".into(), Some(vec![])),
+        ],
+    )
+    .unwrap();
     let c = container(&r, "Player").unwrap();
-    assert_eq!((c.display.as_str(), c.blobs.clone()), ("Slot 1", vec![("a".into(), 3), ("b.c".into(), 0)]));
+    assert_eq!(
+        (c.display.as_str(), c.blobs.clone()),
+        ("Slot 1", vec![("a".into(), 3), ("b.c".into(), 0)])
+    );
     assert!(c.modified > 0);
     assert_eq!(read(&r, "Player", "a"), Some(vec![1, 2, 3]));
-    commit(&r, "Player", "Slot 2", &[("a".into(), Some(vec![9])), ("b.c".into(), None), ("none".into(), None)]).unwrap();
-    assert_eq!(container(&r, "Player").unwrap().blobs, vec![("a".into(), 1)]);
+    commit(
+        &r,
+        "Player",
+        "Slot 2",
+        &[
+            ("a".into(), Some(vec![9])),
+            ("b.c".into(), None),
+            ("none".into(), None),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        container(&r, "Player").unwrap().blobs,
+        vec![("a".into(), 1)]
+    );
     assert_eq!(read(&r, "Player", "a"), Some(vec![9]));
     assert_eq!(containers(&r).len(), 1);
     delete(&r, "Player").unwrap();

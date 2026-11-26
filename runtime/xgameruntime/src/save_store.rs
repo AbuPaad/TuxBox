@@ -48,22 +48,44 @@ pub fn container(root: &Path, name: &str) -> Option<Container> {
     let (mut blobs, mut modified) = (Vec::new(), 0);
     for entry in fs::read_dir(&dir).ok()?.flatten() {
         let file = entry.file_name();
-        let Some(blob) = file.to_str().and_then(|f| f.strip_prefix("b_")).filter(|f| !f.ends_with(".tmp")).and_then(decode) else { continue };
+        let Some(blob) = file
+            .to_str()
+            .and_then(|f| f.strip_prefix("b_"))
+            .filter(|f| !f.ends_with(".tmp"))
+            .and_then(decode)
+        else {
+            continue;
+        };
         let Ok(meta) = entry.metadata() else { continue };
-        let Ok(size) = u32::try_from(meta.len()) else { continue };
-        if let Some(t) = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) {
+        let Ok(size) = u32::try_from(meta.len()) else {
+            continue;
+        };
+        if let Some(t) = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        {
             modified = modified.max(t.as_secs() as i64);
         }
         blobs.push((blob, size));
     }
     blobs.sort();
     let display = fs::read_to_string(dir.join("display")).unwrap_or_default();
-    (!blobs.is_empty()).then(|| Container { name: name.into(), display, blobs, modified })
+    (!blobs.is_empty()).then(|| Container {
+        name: name.into(),
+        display,
+        blobs,
+        modified,
+    })
 }
 
 pub fn containers(root: &Path) -> Vec<Container> {
-    let mut all: Vec<_> = fs::read_dir(root).into_iter().flatten().flatten()
-        .filter_map(|e| container(root, &decode(e.file_name().to_str()?)?)).collect();
+    let mut all: Vec<_> = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| container(root, &decode(e.file_name().to_str()?)?))
+        .collect();
     all.sort_by(|a, b| a.name.cmp(&b.name));
     all
 }
@@ -74,12 +96,22 @@ pub fn read(root: &Path, container: &str, blob: &str) -> Option<Vec<u8>> {
 
 /// Commit staged writes (Some) and deletes (None). Each blob replaces its
 /// predecessor by rename, so an interrupted write never truncates a save.
-pub fn commit(root: &Path, container: &str, display: &str, changes: &[(String, Option<Vec<u8>>)]) -> io::Result<()> {
+pub fn commit(
+    root: &Path,
+    container: &str,
+    display: &str,
+    changes: &[(String, Option<Vec<u8>>)],
+) -> io::Result<()> {
     let dir = dir(root, container).ok_or(io::ErrorKind::InvalidInput)?;
     fs::create_dir_all(&dir)?;
-    let staged: Vec<_> = changes.iter().map(|(blob, data)| (dir.join(format!("b_{}", encode(blob))), data)).collect();
+    let staged: Vec<_> = changes
+        .iter()
+        .map(|(blob, data)| (dir.join(format!("b_{}", encode(blob))), data))
+        .collect();
     for (path, data) in &staged {
-        if let Some(data) = data { fs::write(path.with_extension("tmp"), data)? }
+        if let Some(data) = data {
+            fs::write(path.with_extension("tmp"), data)?
+        }
     }
     for (path, data) in &staged {
         match data {

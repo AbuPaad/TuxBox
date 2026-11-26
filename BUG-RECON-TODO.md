@@ -831,6 +831,54 @@ a package root with one real file and one symlink to a file outside the root.
 
 ---
 
+## BR-39 — XSystemAnalytics served, and the calling convention it really has
+
+Status: `implemented`, recorded 2026-11-27.
+
+The title asks `QueryApiImpl` for class `b884675d`, interface `b884675d`, then calls slot 3. Our runtime
+answered `E_NOINTERFACE`, so the class is now served from `services`:
+
+- `AnalyticsInfo` is `XVersion osVersion`, `XVersion hostingOsVersion`, `char family[64]`, `char
+  form[64]`, which is 144 bytes, matching what the documented header declares.
+- `text::<64>` fills each description and always leaves a terminator, so a longer name truncates
+  instead of overrunning.
+- The answer is a fixed offline Series S: `Xbox`, `Xbox Series S`, title OS 10.0.25398.0.
+- `available()` now includes index 7, so `TUXBOX_RUNTIME_SERVICES=0` still withholds it.
+
+**The signature is not an HRESULT, and the first guess was wrong.** Reading the title's own stub at
+`0x1455dea30`:
+
+```
+and  qword [rsp+0x20], 0
+mov  r8d, 0x90                  ; 144
+call memset                     ; zero the scratch record
+lea  r8, [rsp+0x20]             ; &object
+lea  rcx, [class]; mov rdx, rcx ; iid = class
+call QueryApiImpl
+mov  rcx, [rsp+0x20]            ; this
+mov  rax, [rcx]                 ; vtable
+lea  rdx, [rsp+0x30]            ; the caller's 144-byte buffer
+mov  rax, [rax+0x18]            ; slot 3
+call rax
+movups xmm0, [rax]              ; copies 144 bytes FROM THE RETURN VALUE
+```
+
+So the method returns a **pointer** to the record, not a status. The first implementation returned
+`S_OK`, which is zero, and the title dereferenced that null pointer. Ten tests cover it. They check the
+size, the terminators, the buffer choice and a null answer, and they check that the returned pointer is
+the buffer the caller passed.
+
+**What this did not fix.** The fatal trap stays at `+0x5925915`, the address it also reached while
+analytics was unsupported. Analytics was a logged unknown, not the cause of the abort. The earlier
+reading that made it the next stop was wrong. This entry records that so the same road is not walked
+twice.
+
+Next step: extend the probe to log **every** served method call, not only unknown classes. The last call
+before the trap then names the subsystem that asserts. The trap follows a run of vtable releases at
+`0x1459258f0`, which reads as a teardown path rather than an argument check.
+
+---
+
 ## BR-38 — DLL dependency audit against the other trees
 
 Status: `audit`, recorded 2026-11-27. Compiled from the title's import table, this tree's build output,
