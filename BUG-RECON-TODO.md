@@ -793,6 +793,63 @@ Actions for this tree, in order:
 4. Copy the quad test case from finding 3 into `tests/hlsl/pixel_quad.rs`: a broadcast where the
    helper lane is the only lane holding the value.
 
+---
+
+## BR-33 — First boot attempt: it binds, opens every archive, then aborts in System Init
+
+Status: `finding`, recorded 2026-11-27 evening.
+
+Setup: `victory.exe` from `Belobug/VIctory-Belobug-AMD` at `81ebb7b`, under GE-Proton's `wine`, prefix
+`p2`, `VICTORY_GAME_DIR=/home/fih/gta6-run`, `VICTORY_CACHE_DIR=/home/fih/belobug-run/cache`,
+`--console series-s`, `RUST_LOG=info`. The exe is the verified `e95020b2...` build. Process exit 3 after
+about 0.8 s.
+
+**What worked.**
+
+| Stage | Result |
+| --- | --- |
+| Image map and imports | every import bound, 0 missing: exe 94 HLE, 421 host, 72 title |
+| Companion DLLs | `xboxbvhbuilder`, `amd_fidelityfx_loader_xbox`, `libhttpclient.gdk`, `bink2scarlett` all bound |
+| Console profile | reported `Lockhart`, which is the Series S profile asked for |
+| DirectStorage | 8 workers, 32 MB staging, 10 archives opened: appdata0, common, movies, shaders, anim, data, levels, navmeshes, packs, textures |
+| Frames | none. Never reached a present |
+
+**Where it died.** `unhandled exception 0x80000003` at `victory-image-b99f876b74d4a77f.dll+0x1ce6e13`,
+with frame 10 of the stack at `+0x56a1e5a`, a few instructions below the entry point `0x56a1ec8`.
+`0x80000003` is a breakpoint instruction, so the title's own assert fired.
+
+**What the title's crash log says.** It wrote `victory-20261127-052914-244.crash.log` beside a 121 kB
+minidump. The fields that matter:
+
+```
+Game Running Time: 0h:0m:0s     Game State: System Init [T:103153513]   Frame: 0
+Conole Type: Lockhart           Streaming Requests: 0
+MemoryINFO: Game Virtual 0/0, Game Physical 0/0, OS 0/0, Pool 0/0
+TileHeap: used 0Mb - total 0Mb  Version: (empty)
+```
+
+Zero allocated memory and zero streaming requests place the abort before any asset read. The 24 %
+download is therefore unlikely to be the cause of this crash. The empty `Version:` field is the most
+suspicious value in the report. A title that fills that field from a build description would assert
+when the description comes back empty.
+
+**Safety.** The title's crash handler POSTed a 126,161-byte minidump to `submit.backtrace.io` and the
+layer refused it: `HTTP connection blocked destination=submit.backtrace.io:443`. This is the fault
+`AGENTS.md` warns about, and it is the reason a title runs only through a layer with egress blocked.
+
+**What this is not.** It is not a picture, and it is not a data verdict. It is a boot receipt. Every
+archive opens, every import binds, the profile is taken as asked, and the title stops in its own
+start-up.
+
+Next steps, in order:
+
+1. Find what fills `Version:` in the title image and what the assert compares it against. The image is
+   already in `belobug-run/cache/images`, so this needs no run.
+2. Build `DexNom/VIctory` for a fair comparison. Their branch is the one that reports every texture
+   rendering, and this result comes from a tree three commits behind it.
+3. Do not repeat this on TuxBox yet. Coverage is still the gate there, and a Linux boot would add a
+   second variable to a fault that already has one.
+
 ## BR-32 — A contributor's numbers on your exact card (RX 6700 XT, 12 GB)
 
 Status: `research`, recorded 2026-11-27. Source: a commenter on the VIctory developer post, running a
