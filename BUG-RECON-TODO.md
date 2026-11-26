@@ -831,6 +831,63 @@ a package root with one real file and one symlink to a file outside the root.
 
 ---
 
+## BR-43 — Recon: every fork agrees on XPackage, and the trap is not package data
+
+Status: `research`, recorded 2026-11-27. Three delegated sweeps over eleven trees plus the board.
+
+**No fork maps a package to a drive through XPackage.** All ten Rust-heritage trees share one
+implementation: slot `0x138` `enumerate` returns `S_OK` and never invokes the callback, `mount_path`
+(`0xc8`) returns `E_INVALIDARG`, and `mount_async` (`0x128`) finishes with `NO_PACKAGE`. `XCL` differs: it
+answers `XPackageMount` with `game_root()` and defaults `G:` to the game directory.
+
+The drive letter therefore comes from the file layer, not the platform API. Belobug mounts the title
+directory as `G:` in its launcher (`crates/victory-run/src/run.rs:99-100`, `files.rs:66-69`), which is the
+same shape as `claim_package_drive` in `project_tuxbox/host.py`. That part of our design is right.
+
+Documented title offsets are thin: only `0x2937bf0` (the title's one enumerate call site, kind 1) and
+`0x293b4b0` (its chunk manager) appear in the forks, in `xpackage.rs`. No tree names our trap or its
+callers.
+
+**The trap is a fail-fast on a member of a runtime object.** A run with `WINEDEBUG=+seh` raised no C++
+exception at all, so nothing is throwing. The full unwind, callers last:
+
+```
++0x56A1E5A  start-up around the entry point 0x56A1EC8
++0x5A91C0D  CRT wrapper, the instruction after its call to main
++0x1D109C9  inside main (0x141d109b0)
++0x00661F0  early run-time set-up
++0x53EBF3A, +0x53EC04F, +0x81B253, +0x2240EAB
++0x2236CF6  the function that writes G:/ into 0x1474530b0
++0x293EF38  inside 0x14293ee20, the instruction after its call to 0x145a3f200
++0x1CE6E13  the int3 stub
+```
+
+`0x145a3f200` opens with `mov rax, [rcx+0x2b0]; test rax, rax`, so the object it inspects has an empty
+member, and the code fails fast rather than returning. The caller passes `lea r8, [0x1463011e4]`, and that address holds the constant `0xdf7b0ec5`, which also
+appears inside the lookup helper at `0x14293f237`. The title looks a named entry up by a 32-bit key.
+
+`0xdf7b0ec5` is not an obvious string hash: 30 plausible names under six common 32-bit hashes (FNV-1a,
+FNV-1, CRC-32, djb2, sdbm, Jenkins) produced no match. Treat it as an opaque key, not a filename.
+
+The branch for a failed lookup at `0x142236d72` is a graceful early return, which rules out "the package
+is not installed" as the fatal step. The fatal path runs later in the same routine.
+
+**Wanted next**, in order:
+
+1. Read `0x145a3f200` in full. The member at `+0x2b0` of that object decides whether the title continues.
+2. Pull the upstream commits. `brcly/TuxBox` pushed five today, including `d3d12: wait for a shader reply
+   on its request, with pauses that grow` and `tools: check mask ballots in the form a Wave32 host runs`.
+3. Read `LooperSalty/AnyXboxX` (`tools/linux`, `scripts/play.sh`). It ships an "anonless shim" and a
+   patched RADV for Proton on AMD, which is the page-import gap in BR-12 and BR-26. It reports 15-20 fps
+   with ray tracing on. Also `luizwidmer/palmetto`, which traced a stage-3 wait to a missing subscriber
+   completion.
+
+Board state: twelve rows cannot be checked at all, six because `repo` is null and six because GitHub
+answers 404. `Zettrox/ztrx`, `realdody/americas-recomp`, `ItsNotRexed/Leonida`, `ethan00013/keylime`,
+`zohaiblazuli/GrandTheftXbox` and `JPTuba9/xlaunch-vi` all fall in the second group.
+
+---
+
 ## BR-42 — The package enumerate call is not the trap
 
 Status: `finding`, recorded 2026-11-27 late, with one defensive fix landed.
