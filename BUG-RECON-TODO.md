@@ -917,6 +917,27 @@ layer refused it: `HTTP connection blocked destination=submit.backtrace.io:443`.
 archive opens, every import binds, the layer runs the profile the caller asks for, and the title stops
 in its own start-up.
 
+**The same abort under TuxBox.** With the full provider set staged beside the exe, `tuxbox.py run
+--offline` on GE-Proton11-14 loaded `d3d12_xs`, `xmem`, `xcrdapi` and `chad`, applied both title
+patches, and then stopped at the same place:
+
+```
+TuxBox d3d12_xs: replaced clzero loops at RVA 0x4e8aa10 with AVX stores (host lacks CLZERO)
+TuxBox d3d12_xs: patched the title's audio pump (RVA 0x5267740) to release its lock
+warn:seh:dispatch_exception EXCEPTION_BREAKPOINT exception (code=80000003) raised
+warn:seh:virtual_unwind backtrace: game_scarlett_master.exe + 0000000005A91C21
+warn:seh:virtual_unwind backtrace: game_scarlett_master.exe + 00000000056A1E5A
+Game exited with exit code 3 after 5.1s
+```
+
+The second frame is `0x56A1E5A`, the same frame the Windows fork reported, a few instructions below the
+entry point `0x56A1EC8`. Two independent layers now stop in the same title start-up path, one with a
+Win32 HLE and one with this provider on Wine. That makes the abort a property of the title and its
+environment, not of either layer.
+
+Also worth staging before the next attempt: `dxcompiler.dll` and `dxil.dll` are absent, and the run
+reports it. Rectangle pipelines need both from the same Microsoft release.
+
 Next steps, in order:
 
 1. Find what fills `Version:` in the title image and what the assert compares it against. The image is
