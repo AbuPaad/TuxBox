@@ -141,6 +141,34 @@ pub(super) fn on_demand(shader: &[u8], source: &str, stage: Stage) -> Option<Vec
     })
 }
 
+/// Record a program for offline translation, without waiting for the result.
+///
+/// The mesh path uses this for its pipeline-root variant. A recorded request
+/// carries no root of its own, so preparation refuses it with "mesh root
+/// signature missing". Recording the variant under its own digest lets a later
+/// preparation translate the program the run actually used, and the runtime
+/// finds that translation when it asks for the same digest.
+pub(super) fn record_source(shader: &[u8], source: &str, stage: Stage) {
+    let Some(dir) = session() else { return };
+    let requests = dir.join("requests");
+    let published = requests.join(format!("{source}.dxbc"));
+    if published.exists() {
+        return;
+    }
+    if let Some(cache) = compiler_cache(dir)
+        && (cached_translation(cache, source, stage).is_some() || cached_refusal(cache, source))
+    {
+        return;
+    }
+    // The title thread must not wait here: this runs during pipeline creation.
+    let pending = requests.join(format!("{source}.{}.tmp", std::process::id()));
+    if fs::write(&pending, shader).is_err() {
+        let _ = fs::remove_file(&pending);
+        return;
+    }
+    let _ = fs::rename(&pending, &published);
+}
+
 /// The translation of compute program `source` for hosts with 32-lane waves,
 /// which the compiler keeps beside the ordinary one.
 pub(super) fn narrow_wave(shader: &[u8], source: &str) -> Option<Vec<u8>> {

@@ -251,7 +251,28 @@ pub(super) fn mesh_link_source(shader: &[u8], root: Option<&[u8]>) -> Vec<u8> {
     {
         return shader.to_vec();
     }
-    root.and_then(|root| with_root(shader, root)).unwrap_or_else(|| shader.to_vec())
+    let Some(attached) = root.and_then(|root| with_root(shader, root)) else {
+        return shader.to_vec();
+    };
+    record_rooted_mesh(&attached);
+    attached
+}
+
+/// Records a mesh program with its pipeline root, so offline preparation can
+/// translate it. Preparation reads the recorded requests, which carry no root.
+fn record_rooted_mesh(attached: &[u8]) {
+    static RECORDED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+    let Some(source) = source_digest(attached) else {
+        return;
+    };
+    if !RECORDED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(source.clone())
+    {
+        return;
+    }
+    compile::record_source(attached, &source, Stage::Mesh);
 }
 
 /// Retranslates a mesh program for one pixel consumer, so that its vertex and

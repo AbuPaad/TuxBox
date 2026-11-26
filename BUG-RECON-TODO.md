@@ -566,6 +566,10 @@ Order of work, cheapest first:
    root at pipeline creation (`mesh_link_source` and `link_mesh` in `device/shader_cache.rs:248-274`).
    The offline record does not carry it, so preparation translates without it. Action: record the
    root beside the source, as `.link` already records a linked pair. This needs no GPU.
+   Implemented on 2026-11-27. `compile::record_source` writes the pipeline-root variant into
+   `requests/` under its own digest, and `mesh_link_source` calls it once per digest. The worker
+   already accepts a 64-hex `.dxbc` name, so the change needed no Python edit. The provider builds,
+   but the crate has no runnable tests on this host, so a run must check the 1,551 drop.
 2. **`IDXEN` stride, 129 requests.** `refused_for_heap_strides` already exists in the same file.
    Action: record the per-slot stride with the request. This also needs no GPU.
 3. **Wave reduction in large programs, 1,502 requests.** The limit stays until the generated code
