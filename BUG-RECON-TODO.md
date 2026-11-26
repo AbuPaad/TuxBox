@@ -831,6 +831,72 @@ a package root with one real file and one symlink to a file outside the root.
 
 ---
 
+## BR-40 — The wall was GameInput, and the forks serve twice the classes we do
+
+Status: `finding`, recorded 2026-11-27 late, from PortWatch plus eleven clones.
+
+**Where the boot actually stopped.** The trap at `+0x5925915` was not a class or an assert helper. The
+enclosing function calls `0x145f3fed0`, tests the sign of the result, and jumps to `int 3` on failure.
+That address is a thunk:
+
+```
+0x145f3fed0  jmp qword [GameInput.dll_Ordinal_1]
+```
+
+So the title called `GameInputCreate`, took a negative HRESULT, and killed itself. Our `GameInput.dll`
+exports ordinal 1 as `GameInputCreate`, but it was never staged beside the exe, so Wine's builtin answered
+instead.
+
+With `build/gameinput/GameInput.dll` staged, the run passes that point and reaches more of the runtime:
+
+```
+TuxBox xgameruntime: serving XNetworking, XUser, XPackage (0b9d556e)
+TuxBox xgameruntime: called package_is_packaged
+TuxBox xgameruntime: called package_enumerate kind 1 scope 0
+```
+
+Then it fails again, now at `+0x1CE6E13` from caller `+0x293EF38`. That first address is a shared
+fail-fast stub, so the caller is what identifies the next check. It follows package enumeration.
+
+**Class coverage, measured rather than guessed.** A sweep of every GUID literal in eleven clones, tolerant
+of the underscore form the forks use (`0xe349_bd1a`), gives the same answer for all of them:
+
+| Set | Count | Names |
+| --- | --- | --- |
+| Served by every fork | 20 | the ten we serve, plus `XAccessibility`, `XAppCapture`, `XGameEvent`, `XGameInvite`, `XGameRuntimeFeature`, `XGameUi`, `XUserDevice`, `XSystem` provider and its second interface, `XGame` second interface |
+| Served by this tree | 10 | `XUser`, `XGame`, `XPackage`, `XPersistentLocalStorage`, `XNetworking`, `XDisplay`, `XGameSave`, `XSystemAnalytics`, `XSystem`, `XThreading` |
+
+`XAccessibility` is present in our table but probe-only. The six that are absent entirely are
+`XAppCapture`, `XGameEvent`, `XGameInvite`, `XGameRuntimeFeature`, `XGameUi` and `XUserDevice`.
+
+A lesson about method, not code: the first sweep missed Belobug's analytics class because it searched for
+`b884675d` while the source writes `0xb884_675d`. Grep for the distinguishable prefix, or parse the
+numbers.
+
+**Architecture, worth taking.** Every fork intercepts `LoadLibrary` by name and serves the Xbox DLLs
+in-process. We ship real DLLs and let the loader find them. Both work. Theirs turns a missing or failing
+stub into a *silent* HLE answer instead of a `GetProcAddress` failure, and it removes the need to match
+each flat export's ABI exactly. That is why their boots pass faults that stop ours at the loader.
+
+`Kelvaroq` also records that the title's console-model function returns 7 for Series X and 6 for Series S.
+Their runtime keeps an in-memory registry for it. Ours writes `ConsoleMode` into a Wine prefix instead,
+in `graphics_profile.py`.
+
+**Next three steps**, in order:
+
+1. Read `+0x293EF38` to name the check that fires after package enumeration. Our `package_enumerate`
+   answers kind 1 scope 0 with an empty result, and the title likely expects its own package to be
+   present.
+2. Serve the six missing classes. A title that asks for one and gets `E_NOINTERFACE` may assert later,
+   even when start-up does not fail.
+3. Stage every provider DLL from the start. Three separate stalls came from a file we built and never
+   copied.
+
+PortWatch, for the record: `boots=1` for TuxBox, and twenty of forty-four efforts reach a menu. `menu`,
+`world` and `playable` all sit at zero here.
+
+---
+
 ## BR-39 — XSystemAnalytics served, and the calling convention it really has
 
 Status: `implemented`, recorded 2026-11-27.
