@@ -831,6 +831,65 @@ a package root with one real file and one symlink to a file outside the root.
 
 ---
 
+## BR-41 — CGBJ's latest commits: three things worth taking
+
+Status: `research`, recorded 2026-11-27. Source: `cesarzxk/CGBJ-trustno1-VIctory-NVIDIA` on the mirror
+(642 commits, forked from `trustno1-coder/VIctory-NVIDIA`), plus six commits at 17:59 on
+`DoubleGhosty/cool_fox` (593 stars).
+
+CGBJ is not a source tree of its own. The name resolves to a binary drop (`CGBJ.exe`, twelve files, no
+source) and, on the mirror, to that NVIDIA fork. Its newest commits port two things from cool_fox:
+host-memory admission and a staging floor.
+
+**1. Data staging: 32 MiB is the console's size, and it starves a PC.** Commit `40acae4938` reports that
+the title asks for the console's 32 MiB and stops if the call fails. The PC worker threads then starve on
+multi-MB RPF chunks. A 256 MiB floor now applies, with `VICTORY_DSTORAGE_STAGING_MB` to set it and 0 to
+keep the title's own value. Our runs log `32 MB staging, 8 workers` because we honour the title's
+request, so the same starvation applies here.
+
+**2. Host-memory admission, measured.** `residency.rs` samples free physical and commit memory every
+32 ms and refuses the layer's own growth when the host is short. The texture pass runs only with 256 MiB
+free for a bake or 512 MiB otherwise. A brand-new upload buffer needs 256 MiB or 1024 MiB
+before we commit it. Pressure starts below 5 GiB free physical or 6 GiB commit and clears above 3 GiB and 4 GiB. It
+is critical below 1.5 GiB, and an `E_OUTOFMEMORY` defers uploads for 500 ms.
+
+The distinction matters. Our `xmem` already reads `GlobalMemoryStatusEx` and reports a **budget** to the
+title: committed plus available headroom, capped at physical (`runtime/xmem/src/lib.rs:266-296`). That
+tells the title it is short. It does not stop our own upload storage from growing, which is what pushed
+their host into a black screen.
+
+**3. Half render scale with the title's own upscaler is the frame-rate lever. Resolution is not.**
+Measured on an RTX 3080 Ti at Series S:
+
+| Setting | Frame |
+| --- | --- |
+| cool_fox, 1440p native | 394 ms |
+| cool_fox, 144p | 361 ms |
+| CGBJ plus residency, 540p with the title's upscaler | **71.7 ms** |
+
+100x fewer pixels bought 8 %. The 5x came from half scale, `VICTORY_OWN_UPSCALER`, `VICTORY_BVH_MISS`,
+1,034 skipped ray-tracing shaders and the Series S compose plane. Inside the 71.7 ms frame: 44.7 ms
+preparing, of which 18.8 ms copies, and 18.5 ms copying back.
+
+**Also worth knowing.** `VICTORY_COMPOSE=1` lays the Series S 4K interface plane over the 1080p game
+plane. Without it, "everything before gameplay is black", ported from `fxceless/victory-gta6` PR #1189.
+`VICTORY_PORT_CONSTANTS=1` now defaults on in their launchers. It maps the title's 185 MB 32-bit graphics
+heap in place through `OpenExistingHeapFromAddress1`. That removes a 174 MB ring's host copy, about 17 MB
+a frame sent up in 600 pieces. That one needs Windows page aliasing. It is the RADV gap already
+recorded in BR-12 and BR-26, so the number transfers and the mechanism does not.
+
+**Next actions here**, cheapest first:
+
+1. Expose a staging floor in `runtime/xcrdapi` so a read larger than 32 MiB cannot starve the workers.
+   Log the requested and the effective size.
+2. Gate our own upload and staging growth on free commit, since the budget report alone does not.
+3. Treat black-before-gameplay on the Series S profile as a compose-plane symptom before calling it a
+   rendering bug.
+
+Licence: GPL-3.0-or-later trees, Apache-2.0 here. Mechanisms and measurements only, reimplemented, credited.
+
+---
+
 ## BR-40 — The wall was GameInput, and the forks serve twice the classes we do
 
 Status: `finding`, recorded 2026-11-27 late, from PortWatch plus eleven clones.
