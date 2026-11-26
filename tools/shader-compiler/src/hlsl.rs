@@ -52,6 +52,9 @@ mod cpu_oracle;
 #[path = "tests/hlsl/heap_resinfo.rs"]
 mod heap_resinfo;
 #[cfg(test)]
+#[path = "tests/hlsl/mtbuf_format.rs"]
+mod mtbuf_format;
+#[cfg(test)]
 #[path = "tests/hlsl/compute_swizzle.rs"]
 mod compute_swizzle;
 #[cfg(test)]
