@@ -740,3 +740,49 @@ Checks so far:
 | Date | Trees read | Result |
 | --- | --- | --- |
 | 2026-11-27 | Victory-United, XCL, klbf-lab, VIctory-7900XTX | BR-28: the store and stride pair is host-side work. Write access is a handle property. The AMD deny list is one hash. Unordered early pipelines crash AMD's compiler |
+| 2026-11-27, second pass | Victory-United `docs/bug-journal.md`, full | BR-30: the upload and staging budget numbers, an allocator test technique, and a reverted alias experiment |
+
+---
+
+## BR-30 — Upload, staging and memory budget numbers from Victory-United
+
+Status: `research`, recorded 2026-11-27. Source: `Fayberr/Victory-United` `docs/bug-journal.md`.
+Licence: GPL-3.0-or-later. Numbers and shapes only.
+
+Their entry "19:15-20:30, commit-gate starvation & synchronous bake uploads" carries figures a
+limited-memory host can use as a starting point:
+
+| Setting | Value |
+| --- | --- |
+| Upload reserve | 256 MiB during a bake, 512 MiB otherwise |
+| Growth reserve | 256 MiB during a bake, 1024 MiB for speculative bindless |
+| Pressure entry | 3 GiB RAM used, 4 GiB commit |
+| Pressure recovery | 5 GiB RAM used, 6 GiB commit |
+| Staging block growth | 64 MiB blocks, gated to speculative bindless only, rest 2500 ms |
+| Speculative staging per frame | 16 MiB under pressure, 32 MiB on a limited-RAM host with 1 GiB live staging |
+
+Their entry "15:45, staging admission" adds three rules. One texture may cross the cap. Required
+bakes keep their own budget. An explicit stage-budget override wins.
+
+Two behaviours behind those numbers:
+
+- One-shot bake uploads go through a dedicated synchronous host list. The upload publishes the
+  descriptor afterwards.
+- The maintenance pass releases spare staging blocks when host pressure rises.
+
+A test technique worth copying: their entry "15:56-15:59, reproducer and fix" replays eight
+reported upload sizes through the pool with a failing block allocator. The unpatched test made eight
+block creation attempts. That turns an out-of-memory report into a unit test.
+
+A dead end, recorded so we do not repeat it: "20:50-21:10, alias-flood experiment reverted".
+Propagating aliased view maps and unmaps into `REMAPPED` with a wider bake lookahead produced 2-4 GiB
+bake truncations and visual regressions, and they reverted it. This bears on the alias work at BR-1
+and BR-22.
+
+Actions for this tree, in order:
+
+1. Find whether our upload path has a per-frame speculative cap. If it has none, add one with a
+   figure from the table, and a test that a single large texture is never split.
+2. Write the allocator failure-injection test for our own pool, using their eight-size replay as the
+   shape.
+3. Record the alias-flood result against BR-1 and BR-22 before anyone widens the alias propagation.
