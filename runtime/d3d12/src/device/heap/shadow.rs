@@ -1,29 +1,22 @@
-//! Anonymous shadow copies when the host rejects section-backed host-memory imports.
+//! A copy of game memory the GPU can read, for hosts whose imports of the game's
+//! section views do not reach the real pages (see the host profile).
+//!
+//! CPU writes are copied in before each submission. GPU writes stay in the copy:
+//! the CPU and other addresses of the same pages do not see them.
+//!
+//! From pull request #200 by DrArroway.
 use super::{ImportedHeap, trace_import_failure};
 use crate::commands::page_mapping::ImportPin;
 use core::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
-use windows::Win32::Foundation::{
-    CloseHandle, E_INVALIDARG, E_OUTOFMEMORY, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
-};
-use windows::Win32::Graphics::Direct3D12::{
-    D3D12_COMMAND_LIST_TYPE_COPY, D3D12_COMMAND_QUEUE_DESC, D3D12_FENCE_FLAG_NONE,
-    D3D12_HEAP_FLAG_NONE, D3D12_HEAP_PROPERTIES, D3D12_HEAP_TYPE_READBACK, D3D12_RANGE,
-    D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER,
-    D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST,
-    D3D12_TEXTURE_LAYOUT_ROW_MAJOR, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue,
-    ID3D12Device, ID3D12Device3, ID3D12Device13, ID3D12Fence, ID3D12GraphicsCommandList,
-    ID3D12Heap, ID3D12Resource,
-};
-use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
+use windows::Win32::Foundation::{E_INVALIDARG, E_OUTOFMEMORY};
+use windows::Win32::Graphics::Direct3D12::{ID3D12Device3, ID3D12Device13};
 use windows::Win32::System::Memory::{
-    CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEM_COMMIT, MEM_MAPPED, MEM_RELEASE, MEM_RESERVE,
-    MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_GUARD,
-    PAGE_NOACCESS, PAGE_READWRITE, UnmapViewOfFile, VirtualAlloc, VirtualFree, VirtualQuery,
+    MEM_COMMIT, MEM_MAPPED, MEM_RELEASE, MEM_RESERVE, MEMORY_BASIC_INFORMATION, PAGE_GUARD,
+    PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc, VirtualFree, VirtualQuery,
 };
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
-use windows::core::{Interface, Result};
+use windows::core::Result;
 
 const MAX_SHADOW_BYTES: usize = 1 << 30;
 const PAGE_STEP: usize = 4096;
@@ -131,10 +124,6 @@ impl ShadowPages {
         diff_copy_chunks(guest, &mut state.baseline, shadow);
         true
     }
-}
-
-pub(super) fn is_userptr_refusal(error: &windows::core::Error) -> bool {
-    matches!(error.code(), E_OUTOFMEMORY | E_INVALIDARG)
 }
 
 /// True when `base..base+size` is fully committed `PAGE_READWRITE` and contains
@@ -282,184 +271,11 @@ pub(crate) fn sync_shadow_imports() {
     });
 }
 
-pub(super) fn log_shadow_probe_once() {
+fn log_first_mirror() {
     static LOGGED: std::sync::Once = std::sync::Once::new();
     crate::diagnostics::log_once(&LOGGED, || {
-        "host cannot import section-backed guest pages directly; mirroring through anonymous shadow heaps"
-            .into()
+        "game memory is copied for the GPU: this host cannot import it directly".into()
     });
-}
-
-fn log_shadow_once(error: &windows::core::Error) {
-    static LOGGED: std::sync::Once = std::sync::Once::new();
-    crate::diagnostics::log_once(&LOGGED, || {
-        format!(
-            "host refused direct import of section-backed guest pages ({:?}); mirroring through anonymous shadow heaps",
-            error.code()
-        )
-    });
-}
-
-struct ProbeSection {
-    section: HANDLE,
-    ptr: *mut u32,
-}
-
-impl Drop for ProbeSection {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            let _ = unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.ptr.cast() }) };
-        }
-        if !self.section.is_invalid() {
-            let _ = unsafe { CloseHandle(self.section) };
-        }
-    }
-}
-
-struct ProbeEvent(HANDLE);
-impl Drop for ProbeEvent {
-    fn drop(&mut self) {
-        if !self.0.is_invalid() {
-            let _ = unsafe { CloseHandle(self.0) };
-        }
-    }
-}
-
-/// Probe once whether the host actually reads section-backed (`MEM_MAPPED`) guest
-/// pages via `OpenExistingHeapFromAddress*`. On RADV, vkd3d-proton logs
-/// `0x8007000e` internally and silently substitutes a zero-filled heap with `S_OK`.
-/// Unexpected probe-setup failures return `true` to preserve default direct imports.
-pub(super) fn probe_mapped_import(device: &ID3D12Device) -> bool {
-    const PROBE_SIZE: usize = 65536;
-    const PROBE_SENTINEL: u32 = 0x5455_5842;
-    let Ok(section) = (unsafe {
-        CreateFileMappingW(
-            INVALID_HANDLE_VALUE,
-            None,
-            PAGE_READWRITE,
-            0,
-            PROBE_SIZE as u32,
-            None,
-        )
-    }) else {
-        return true;
-    };
-    let view = unsafe { MapViewOfFile(section, FILE_MAP_ALL_ACCESS, 0, 0, PROBE_SIZE) };
-    if view.Value.is_null() {
-        let _ = unsafe { CloseHandle(section) };
-        return true;
-    }
-    let mut guard = Some(ProbeSection {
-        section,
-        ptr: view.Value.cast(),
-    });
-    let ptr = guard.as_ref().unwrap().ptr;
-    // SAFETY: `ptr` points to a valid 64 KiB `PAGE_READWRITE` mapped view.
-    unsafe { ptr.write_volatile(PROBE_SENTINEL) };
-
-    let result: Result<bool> = (|| {
-        let heap: ID3D12Heap = if let Ok(sized) = device.cast::<ID3D12Device13>() {
-            match unsafe { sized.OpenExistingHeapFromAddress1(ptr.cast(), PROBE_SIZE) } {
-                Ok(h) => h,
-                Err(_) => return Ok(false),
-            }
-        } else {
-            let host: ID3D12Device3 = device.cast()?;
-            match unsafe { host.OpenExistingHeapFromAddress(ptr.cast()) } {
-                Ok(h) => h,
-                Err(_) => return Ok(false),
-            }
-        };
-        let src_desc = D3D12_RESOURCE_DESC {
-            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-            Width: 256,
-            Height: 1,
-            DepthOrArraySize: 1,
-            MipLevels: 1,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-            Flags: D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER,
-            ..Default::default()
-        };
-        let mut src: Option<ID3D12Resource> = None;
-        unsafe {
-            device.CreatePlacedResource(&heap, 0, &src_desc, D3D12_RESOURCE_STATE_COMMON, None, &mut src)?;
-        }
-        let Some(src) = src else { return Ok(true) };
-
-        let readback_desc = D3D12_RESOURCE_DESC {
-            Flags: D3D12_RESOURCE_FLAG_NONE,
-            ..src_desc
-        };
-        let readback_heap = D3D12_HEAP_PROPERTIES {
-            Type: D3D12_HEAP_TYPE_READBACK,
-            CreationNodeMask: 1,
-            VisibleNodeMask: 1,
-            ..Default::default()
-        };
-        let mut readback: Option<ID3D12Resource> = None;
-        unsafe {
-            device.CreateCommittedResource(
-                &readback_heap,
-                D3D12_HEAP_FLAG_NONE,
-                &readback_desc,
-                D3D12_RESOURCE_STATE_COPY_DEST,
-                None,
-                &mut readback,
-            )?;
-        }
-        let Some(readback) = readback else { return Ok(true) };
-
-        let q_desc = D3D12_COMMAND_QUEUE_DESC {
-            Type: D3D12_COMMAND_LIST_TYPE_COPY,
-            ..Default::default()
-        };
-        let queue: ID3D12CommandQueue = unsafe { device.CreateCommandQueue(&q_desc)? };
-        let allocator: ID3D12CommandAllocator = unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY)? };
-        let list: ID3D12GraphicsCommandList =
-            unsafe { device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, &allocator, None)? };
-        unsafe {
-            list.CopyBufferRegion(&readback, 0, &src, 0, 4);
-            list.Close()?;
-        }
-        let cmd: ID3D12CommandList = list.cast()?;
-        drop(list);
-        // Create fence and event before submission so every post-submit path can wait.
-        let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE)? };
-        let event = ProbeEvent(unsafe { CreateEventW(None, false, false, None)? });
-        unsafe {
-            queue.ExecuteCommandLists(&[Some(cmd.clone())]);
-        }
-        let waited = unsafe {
-            queue.Signal(&fence, 1).is_ok()
-                && fence.SetEventOnCompletion(1, event.0).is_ok()
-                && WaitForSingleObject(event.0, 5000) == WAIT_OBJECT_0
-        };
-        let completed = unsafe { fence.GetCompletedValue() };
-        if !waited || completed < 1 {
-            // The GPU copy may still be in flight; keep the probe section and COM objects alive.
-            if let Some(section) = guard.take() {
-                core::mem::forget(section);
-            }
-            core::mem::forget((cmd, allocator, queue, fence, event, readback, src, heap));
-            return Ok(true);
-        }
-        if completed == u64::MAX {
-            return Ok(true);
-        }
-        let range = D3D12_RANGE { Begin: 0, End: 4 };
-        let empty = D3D12_RANGE { Begin: 0, End: 0 };
-        let mut mapped = core::ptr::null_mut();
-        unsafe { readback.Map(0, Some(&range), Some(&mut mapped))? };
-        if mapped.is_null() {
-            unsafe { readback.Unmap(0, Some(&empty)) };
-            return Ok(true);
-        }
-        let word = unsafe { mapped.cast::<u32>().read() };
-        unsafe { readback.Unmap(0, Some(&empty)) };
-        Ok(word == PROBE_SENTINEL)
-    })();
-    result.unwrap_or(true)
 }
 
 pub(super) fn open_shadow_sized(
@@ -476,6 +292,7 @@ pub(super) fn open_shadow_sized(
         e
     })?;
     register(&shadow);
+    log_first_mirror();
     Ok(Arc::new(ImportedHeap::shadowed(native, pin, shadow)))
 }
 
@@ -493,41 +310,8 @@ pub(super) fn open_shadow_legacy(
         e
     })?;
     register(&shadow);
+    log_first_mirror();
     Ok(Arc::new(ImportedHeap::shadowed(native, pin, shadow)))
-}
-
-pub(super) fn try_open_sized(
-    device: &ID3D12Device13,
-    base: u64,
-    size: u64,
-    pin: ImportPin,
-    source: &'static str,
-    error: windows::core::Error,
-) -> Result<Arc<ImportedHeap>> {
-    if !is_userptr_refusal(&error) || !contains_mapped_pages(base, size) {
-        trace_import_failure(source, "sized", size, error.code());
-        return Err(error);
-    }
-    let heap = open_shadow_sized(device, base, size, pin, source)?;
-    log_shadow_once(&error);
-    Ok(heap)
-}
-
-pub(super) fn try_open_legacy(
-    host: &ID3D12Device3,
-    base: u64,
-    size: u64,
-    pin: ImportPin,
-    source: &'static str,
-    error: windows::core::Error,
-) -> Result<Arc<ImportedHeap>> {
-    if !is_userptr_refusal(&error) || !contains_mapped_pages(base, size) {
-        trace_import_failure(source, "legacy", size, error.code());
-        return Err(error);
-    }
-    let heap = open_shadow_legacy(host, base, size, pin, source)?;
-    log_shadow_once(&error);
-    Ok(heap)
 }
 
 #[cfg(test)]

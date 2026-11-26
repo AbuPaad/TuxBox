@@ -35,11 +35,7 @@ impl ImportedHeap {
         Self { native, _pin: pin, _shadow: None }
     }
 
-    pub(super) fn shadowed(
-        native: ID3D12Heap,
-        pin: ImportPin,
-        shadow: Arc<super::shadow::ShadowPages>,
-    ) -> Self {
+    pub(super) fn shadowed(native: ID3D12Heap, pin: ImportPin, shadow: Arc<super::shadow::ShadowPages>) -> Self {
         Self { native, _pin: pin, _shadow: Some(shadow) }
     }
 }
@@ -76,10 +72,14 @@ pub(in super::super) fn import_buffer_with_heap(
         "width={:#x} flags={:#x} state={:#x}", desc.Width, desc.Flags.0, state.0));
     let pin = GPU_APERTURE.pin(base, size)?;
     validate_shared_range(base, base.checked_add(size).ok_or(E_INVALIDARG)?)?;
+    super::super::host_profile::report(device);
+    // A host whose GPU cannot read the guest's section views gets a mirrored copy.
+    let mirror = super::super::host_profile::needs_mirror(super::super::host_profile::section_import(device))
+        && super::shadow::contains_mapped_pages(base, size);
     // A guest can place thousands of tiny resources in one multi-GiB XMem
     // reservation. Pin only the pages needed by this resource on the adapter.
     let heap = if let Ok(sized) = device.native.cast::<ID3D12Device13>() {
-        device.state.page_pools.import(&device.native, &sized, base, size, pin, source)?
+        device.state.page_pools.import(&sized, base, size, pin, source, mirror)?
     } else {
         let mut region = MEMORY_BASIC_INFORMATION::default();
         if unsafe { VirtualQuery(Some(base as _), &mut region, size_of_val(&region)) } == 0
@@ -87,15 +87,14 @@ pub(in super::super) fn import_buffer_with_heap(
             return Err(E_NOTIMPL.into());
         }
         let host: ID3D12Device3 = device.native.cast()?;
-        if super::shadow::contains_mapped_pages(base, size)
-            && !device.state.page_pools.supports_mapped_import(&device.native)
-        {
+        if mirror {
             super::shadow::open_shadow_legacy(&host, base, size, pin, source)?
         } else {
-            match unsafe { host.OpenExistingHeapFromAddress(region.AllocationBase) } {
-                Ok(native) => Arc::new(ImportedHeap::direct(native, pin)),
-                Err(error) => super::shadow::try_open_legacy(&host, base, size, pin, source, error)?,
-            }
+            let native = unsafe { host.OpenExistingHeapFromAddress(region.AllocationBase) }.map_err(|error| {
+                trace_import_failure(source, "legacy", size, error.code());
+                error
+            })?;
+            Arc::new(ImportedHeap::direct(native, pin))
         }
     };
     let mut resource = None;
