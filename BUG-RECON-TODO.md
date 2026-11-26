@@ -695,3 +695,44 @@ shows the work spans the provider, which cannot be tested on this host.
 
 The four log lines and the archive moved into `LOGBLOCK.md` as LB-17 to LB-20, so this file does not
 carry a second copy of them. LB-6 already covers the shadow-edge capture for BR-5.
+
+---
+
+## BR-29 — Check the other trees, every time a bucket stalls
+
+Status: `standing`. Instruction added to `AGENTS.md`, section "Working with the other trees".
+
+[git.gtahub.st](https://git.gtahub.st/explore/repos) mirrors about forty efforts on the same title. They
+read the same game files. A fault we hit is usually a fault someone else hit first, and several trees
+are further along than ours.
+
+What to search, on every check:
+
+- The commit logs, `docs/`, the `CHANGELOG`, the `README` and the source, for the words around the
+  fault. Useful words so far: `UAV`, `unordered`, `descriptor`, `stride`, `store`, `wave`, `skip`,
+  `TDR`, `dxil`, `radv`, `amd`.
+- Search for the symptom, not for the file. Their file layout differs from ours.
+
+What transfers:
+
+- A Linux result, and an AMD result, applies to this host.
+- A memory, allocation, engine or archive finding applies to every platform.
+- A Direct3D, Metal, Windows-API or driver-registry result belongs to its tree alone. Say why it does
+  not transfer instead of dropping it silently.
+
+How to read the mirror. Its API answers 403 and its code search answers 404. Use one of these:
+
+```sh
+curl -s "https://api.github.com/repos/<owner>/<repo>/git/trees/<branch>?recursive=1"   # list paths
+curl -s "https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>"              # one file
+git clone --depth 1 <repo> ~/.hermes/cache/scratch/<name>                              # grep locally
+```
+
+Licences: every VIctory fork is GPL-3.0-or-later and XCL is GPL-2.0. Take ideas, measurements and
+test cases. Do not copy code. Credit the tree in the entry.
+
+Checks so far:
+
+| Date | Trees read | Result |
+| --- | --- | --- |
+| 2026-11-27 | Victory-United, XCL, klbf-lab, VIctory-7900XTX | BR-28: the store and stride pair is host-side work. Write access is a handle property. The AMD deny list is one hash. Unordered early pipelines crash AMD's compiler |
