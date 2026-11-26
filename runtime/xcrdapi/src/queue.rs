@@ -132,6 +132,44 @@ struct Overlapped {
     event: usize,
 }
 
+/// Record every file read when `TUXBOX_TRACE_STORAGE` names a log file.
+///
+/// One tab-separated line per read: microseconds since the provider loaded, the
+/// path the title opened, the byte offset, the requested length and the codec.
+/// The log is line-buffered by the kernel because `File` holds no buffer of its
+/// own, so a session that ends abruptly still leaves its reads behind.
+fn trace_read(name: &str, offset: u64, len: usize, zlib: bool) {
+    use std::io::Write;
+    static TRACE: std::sync::LazyLock<Mutex<Trace>> = std::sync::LazyLock::new(|| {
+        let log = std::env::var_os("TUXBOX_TRACE_STORAGE").and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        });
+        Mutex::new(Trace {
+            log,
+            start: std::time::Instant::now(),
+        })
+    });
+    let mut trace = lock(&TRACE);
+    let micros = trace.start.elapsed().as_micros() as u64;
+    let Some(log) = trace.log.as_mut() else {
+        return;
+    };
+    let _ = writeln!(
+        log,
+        "{micros}\t{name}\t{offset}\t{len}\t{}",
+        if zlib { "zlib" } else { "raw" }
+    );
+}
+
+struct Trace {
+    log: Option<std::fs::File>,
+    start: std::time::Instant,
+}
+
 impl Read {
     fn execute(&self) -> Result<(), HRESULT> {
         if self.cancelled {
@@ -163,6 +201,7 @@ impl Read {
         };
         match &self.source {
             Source::File(file, offset) => {
+                trace_read(&file.name, *offset, self.size, self.options & 1 != 0);
                 // A synchronous Win32 handle with an explicit 64-bit OVERLAPPED
                 // offset makes each read atomic w.r.t. concurrent offset reads.
                 let mut ov = Overlapped {

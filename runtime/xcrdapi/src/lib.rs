@@ -32,6 +32,8 @@ struct StorageFile {
 struct FileBacking {
     state: Mutex<FileState>,
     idle: Condvar,
+    /// The path the title opened, as Wine resolved it; only read by the optional trace.
+    name: Arc<str>,
 }
 struct FileState {
     handle: Option<Arc<File>>,
@@ -40,6 +42,7 @@ struct FileState {
 struct FileRead {
     file: Arc<File>,
     backing: Arc<FileBacking>,
+    name: Arc<str>,
 }
 impl FileBacking {
     fn capture(self: &Arc<Self>) -> Result<FileRead, HRESULT> {
@@ -49,6 +52,7 @@ impl FileBacking {
         Ok(FileRead {
             file,
             backing: Arc::clone(self),
+            name: Arc::clone(&self.name),
         })
     }
 }
@@ -135,6 +139,7 @@ impl IFactory_Impl for Factory_Impl {
         // The caller supplies a NUL-terminated Windows path for the duration of OpenFile.
         let wide = windows::core::PCWSTR(path);
         let path = OsString::from_wide(unsafe { wide.as_wide() });
+        let name: Arc<str> = path.to_string_lossy().into_owned().into();
         match OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ.0)
@@ -154,6 +159,7 @@ impl IFactory_Impl for Factory_Impl {
                             requests: 0,
                         }),
                         idle: Condvar::new(),
+                        name,
                     }),
                 }
                 .into();
