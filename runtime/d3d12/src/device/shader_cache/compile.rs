@@ -200,6 +200,9 @@ fn request(
         progress::record(key, Shader::Cached);
         return Some(bytes);
     }
+    // The title thread waits here for the translation (and for any request
+    // ahead of it on the same digest).
+    let _pause = crate::title_watchdog::pause();
     // Serialize the exact digest, not a hash bucket. Unrelated programs
     // must not wait behind a slow translation (or its 90-second timeout).
     static LOCKS: LazyLock<RequestLocks> = LazyLock::new(RequestLocks::default);
