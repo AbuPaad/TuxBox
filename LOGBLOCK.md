@@ -111,9 +111,11 @@ Closes the mesh bucket of BR-27, 1,551 refusals.
 
 Closes the store bucket of BR-27, 577 refusals.
 
-- Change: on each `buffer_store_format to a non-UAV table` and `image_store to a non-UAV table`
-  refusal, print the program digest, the slot, the descriptor's origin (heap or root), and
-  descriptor word 1 (the V#).
+- Done for the heap and MTBUF half in this tree on 2026-11-27. A typed store now refuses with
+  `typed buffer store needs a writable table [tbuffer_store_format_x @ 0x8, descriptor heap s8]`.
+- Still to add: the same suffix on `buffer_store_format to a non-UAV table` (`buffer.rs:610`) and
+  `image_store to a non-UAV table` (`image.rs:231`). Both sit behind a root-signature descriptor, so
+  they need a root fixture before a test can pin them.
 - Keep: those lines for one session, with the refusal totals beside them.
 - Closes when: the lines name what share of the bucket is heap and what share is root. That decides
   which half can be finished on this host. BR-28 records why the answer is host-side work.

@@ -104,8 +104,20 @@ impl<'a> Emitter<'a> {
         let [first, second] = ins.raw[..] else {
             return Err("invalid MTBUF encoding".into());
         };
-        if ins.op >= 4
-            || ins.aux.mask != 1
+        if ins.op >= 4 {
+            // A store needs a writable table. Name the descriptor it names, so a
+            // session says which slots the 577-refusal bucket is made of.
+            let origin = match self.res.get(&idx).and_then(|r| r.first()).copied() {
+                Some(Res::HeapRaw(src)) => format!("descriptor heap s{src}"),
+                Some(Res::Raw(slot, _)) => format!("descriptor root slot {slot}"),
+                _ => "no descriptor".to_string(),
+            };
+            return Err(format!(
+                "typed buffer store needs a writable table [{} @ 0x{:x}, {origin}]",
+                ins.mnemonic, ins.offset
+            ));
+        }
+        if ins.aux.mask != 1
             || first & 0xc000 != 0
             || second & 0x01e0_0000 != 0
             || !self.zero_buffer_offset(ins)

@@ -634,6 +634,8 @@ Order of work, cheapest first:
    commit `a2a358d` is the model, because one latch for several back edges removes duplicated blocks.
 4. **Store to a non-UAV table, 577 requests.** Action: bind the table as unordered access when the
    program writes through it. Check this against a synthetic case in the shader compiler tests.
+   Partly done on 2026-11-27. The heap and MTBUF half now names its descriptor at the refusal, which
+   is the line LB-18 needs. The root-descriptor half still needs a root fixture.
 
 The forks report near-complete coverage: `avatarmanz` translates 25,790 of 25,985 and calls the rest
 unused geometry shaders. That number comes from a tree that patches the title, so treat it as a

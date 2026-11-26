@@ -104,16 +104,15 @@ fn typed_load_of_16_16_snorm_converts_one_channel() {
 #[test]
 fn a_typed_store_is_still_refused() {
     // Op 4 is `tbuffer_store_format_x`. The bucket that refuses stores is worth
-    // 577 of the 4,496 refusals, so this test marks where that work starts.
+    // 577 of the 4,496 refusals, so this test marks where that work starts. The
+    // refusal must name the descriptor the store targets.
     let store = mtbuf_first(24) | (4 << 16);
     let error = match lower(&mtbuf_words(store, MTBUF_SECOND)) {
         Ok(hlsl) => panic!("store translated: {hlsl}"),
         Err(error) => error,
     };
-    assert!(
-        error.contains("unsupported typed buffer load addressing or modifiers"),
-        "{error}"
-    );
+    assert!(error.contains("typed buffer store needs a writable table"), "{error}");
+    assert!(error.contains("descriptor heap s8"), "{error}");
 }
 
 /// `buffer_load_dword` (MUBUF op 12) with IDXEN, through the heap descriptor in s8.
