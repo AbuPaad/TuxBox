@@ -541,6 +541,47 @@ Reproduce the result with these commands:
 Do not commit their sources or binaries into this repository. Their licence is GPL-3.0-or-later. Ours
 is Apache-2.0.
 
+## BR-27 — Translation coverage: the four buckets and what the forks solved
+
+Status: `open`. This is the gate in front of any frame-rate work.
+
+The current figures come from `docs/SHADERS.md` (ProjectScarlett refusals). Preparation compiled
+20,583 of 25,079 recorded requests and refused 4,496. PortWatch still quotes an older reading of
+12,087 of 16,868. Use the 25,079 figures.
+
+The refusals group into four work buckets. Each row gives the count, the code that raises the
+refusal, and the idea from a fork that applies.
+
+| Bucket | Requests | Ours raises it at | Fork idea to reuse |
+| --- | --- | --- | --- |
+| Mesh request recorded without a root signature | 1,551 | `tools/shader-compiler/src/hlsl/mesh.rs:87` (`mesh root signature missing`) | none needed. This is our recording gap |
+| Wave reduction that may run in divergent control flow | 1,502 | `hlsl/rewrite/lanes.rs`, limit at 6,000 instructions | `a2a358d` merges several loop back edges into one latch and raises the pipeline stack |
+| Store to a table that is not an unordered-access table | 577 (432 image, 145 buffer) | image and buffer emitters, UAV rule | not documented in their trees |
+| Raw buffer `IDXEN` access that needs the console stride | 129 | `device/shader_cache.rs:322` | `1f1195c` resolves heap-loaded view addresses |
+| Lane operation with a non-constant lane | 115 | `hlsl/rewrite/lanes.rs:285` | `40205c7` and `c866560` scope wave operations per half wave |
+
+Order of work, cheapest first:
+
+1. **Mesh root signature, 1,551 requests, one third of the total.** The provider already attaches a
+   root at pipeline creation (`mesh_link_source` and `link_mesh` in `device/shader_cache.rs:248-274`).
+   The offline record does not carry it, so preparation translates without it. Action: record the
+   root beside the source, as `.link` already records a linked pair. This needs no GPU.
+2. **`IDXEN` stride, 129 requests.** `refused_for_heap_strides` already exists in the same file.
+   Action: record the per-slot stride with the request. This also needs no GPU.
+3. **Wave reduction in large programs, 1,502 requests.** The limit stays until the generated code
+   compiles faster. A trial translated 1,211 of 1,442. Its samples took 2-12 s in DXC, produced
+   1-2 MB of DXIL, and driver compiles reached six minutes. Action: cut emitted code size first. The fork
+   commit `a2a358d` is the model, because one latch for several back edges removes duplicated blocks.
+4. **Store to a non-UAV table, 577 requests.** Action: bind the table as unordered access when the
+   program writes through it. Check this against a synthetic case in the shader compiler tests.
+
+The forks report near-complete coverage: `avatarmanz` translates 25,790 of 25,985 and calls the rest
+unused geometry shaders. That number comes from a tree that patches the title, so treat it as a
+ceiling, not a target.
+
+Every change in this entry can be tested on this host:
+`cargo test --manifest-path tools/shader-compiler/Cargo.toml --target x86_64-unknown-linux-gnu`.
+
 ---
 
 ## Verification constraints on this host
