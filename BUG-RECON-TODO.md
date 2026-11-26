@@ -793,6 +793,66 @@ Actions for this tree, in order:
 4. Copy the quad test case from finding 3 into `tests/hlsl/pixel_quad.rs`: a broadcast where the
    helper lane is the only lane holding the value.
 
+## BR-32 — A contributor's numbers on your exact card (RX 6700 XT, 12 GB)
+
+Status: `research`, recorded 2026-11-27. Source: a commenter on the VIctory developer post, running a
+private VIctory fork. No repository, so these are self-reported numbers with no commit to read.
+
+Their machine is the same class as this host. Ryzen 5 5500, 16 GB RAM, RX 6700 XT 12 GB, PCIe 3.0.
+Series S profile, with ray tracing and the BVH builder on. `VICTORY_AMBIENT=0`, FSR 4.1.2 INT8 from
+720p to 1080p, and no frame generation.
+
+**What they reached.** 2-2.4 FPS in demanding scenes of 4,100-4,600 draw calls, and about 5 FPS in
+lighter gameplay. GPU utilisation rose from 20-39 % to 49-55 %. Runs lasted 220-244 seconds without a
+crash. Ray-traced indirect light, reflections and shadows are visible. The black-face fault is gone,
+and all 53 BVH builder pipelines are active.
+
+That is the first data point on this card's class with sound visuals. It sets the honest baseline:
+**2-5 FPS, not 20**, for a faithful picture.
+
+**1. D3D12 faults.** With `VICTORY_D3D12_DEBUG=1` they found two causes of `DEVICE_REMOVED`:
+incorrect resource states during `CopyBufferRegion`, and barriers out of step across execution paths.
+They fixed the state tracking and added a local scratch buffer so a copy never runs inside the same
+memory window. Result: over 200 seconds of 3D with no severity 0 or 1 error. Our equivalents are
+`commands/copy_memory.rs:375-407` and `commands/barriers.rs`.
+
+**2. RT memory budget.** They separate explicit mappings and real GPU faults from speculative
+allocations. They cap the speculative share at 25 % of the budget, and they reuse an existing window
+at no cost. Before: 62 of 833 RT pages backed while the whole 768 MB budget was spent. After: 634 of 634 backed on the
+first RT frame, no rejections for the rest of the run. They moved up to 512 MB of RT windows into
+VRAM, and their CPU-side RT comparisons fell from 360-584 MB to 92-130 MB per frame.
+
+**3. Remapping is the biggest single win they report.** Remapping per frame fell from 298-552 ms to
+1.6-19.4 ms. Page faults fell from 51,000-137,000 to 45,000-51,000. The levers were dirty page
+tracking, memory protection on views, less lock contention, and fewer redundant remaps.
+
+**4. Descriptor overhead.** `descriptor::sync_heaps` fell from 35-94 ms to 14-15 ms per frame. The
+levers were parallelising it, removing allocations inside `HostHeap::mirror()`, and spreading
+revalidation over several frames, all at about 41,000-42,000 mirrored slots. Our equivalent is
+`device/descriptor_paging.rs:585 publish` and the mirror in `device/heap/shadow.rs`.
+
+**5. `VICTORY_INPLACE=1` is a dead end on 16 GB.** Pinning about 416 MB dropped free physical RAM to
+57-184 MB and pushed page faults to 1.27 million per frame. Keep it off. This bears on BR-12.
+
+**6. Never measure with diagnostics on.** Building with `--features diagnostics` adds about 200-225 ms
+per frame. Benchmarks need a clean release build.
+
+**Still open for them:** CPU-GPU serialisation at 180-250 ms per frame, and copy or copy-back at
+80-115 MB per frame. Textures and geometry still stream in late, some objects fail to draw, and GPU
+utilisation sits below where it should be.
+
+Actions for this tree:
+
+1. Compare our copy path with finding 1. A copy inside one memory window needs a scratch buffer, and
+   the resource-state bookkeeping around `CopyBufferRegion` deserves a test.
+2. Take finding 2's split, explicit mapping against speculative allocation, and the 25 % cap, as the
+   shape for any RT or BVH residency budget here.
+3. Add a remap cost line to `LOGBLOCK.md`. Their 298-552 ms per frame says this is worth measuring
+   before it is worth optimising.
+4. Record finding 6 beside every performance entry: a diagnostics build cannot be timed.
+
+---
+
 ---
 
 ## BR-30 — Upload, staging and memory budget numbers from Victory-United
