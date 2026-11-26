@@ -156,6 +156,12 @@ impl Upload {
             .ok()
             .filter(|n| *n <= isize::MAX as usize)
             .ok_or(E_OUTOFMEMORY)?;
+        // Refuse to grow this layer's upload storage while the host is short of
+        // commit. Off by default (TUXBOX_COMMIT_ADMISSION=1); the sample and its
+        // log line run either way, so a boot reports the host first. BR-41.
+        if !super::super::pressure::admit(total) {
+            return Err(E_OUTOFMEMORY.into());
+        }
         let desc = D3D12_RESOURCE_DESC {
             Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
             Width: total,

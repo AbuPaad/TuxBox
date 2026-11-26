@@ -204,13 +204,22 @@ impl IFactory_Impl for Factory_Impl {
         if stats.files != 0 || stats.priorities.iter().any(|p| p.queues != 0) {
             return E_INVALIDARG;
         }
+        let requested = size as usize;
+        let effective = staging_size(requested, staging_floor());
         let mut bytes = Vec::new();
-        if bytes.try_reserve_exact(size as usize).is_err() {
+        if bytes.try_reserve_exact(effective).is_err() {
             return E_OUTOFMEMORY;
         }
-        *scratch = Some((size as usize, bytes));
-        stats.title_bytes = size;
-        stats.peak_title_bytes = stats.peak_title_bytes.max(size);
+        if effective != requested {
+            debug_line(&format!(
+                "staging raised from {} MiB to {} MiB (TUXBOX_DSTORAGE_STAGING_MB)",
+                requested >> 20,
+                effective >> 20
+            ));
+        }
+        *scratch = Some((effective, bytes));
+        stats.title_bytes = effective as u32;
+        stats.peak_title_bytes = stats.peak_title_bytes.max(effective as u32);
         S_OK
     }
 }
@@ -248,6 +257,60 @@ impl IStatus_Impl for Status_Impl {
 }
 
 static STAGING: Mutex<Option<(usize, Vec<u8>)>> = Mutex::new(None);
+
+/// The console asks for 32 MiB of staging. On a PC that size bounds one read,
+/// so multi-MB archive blocks starve the workers. Ported measurement:
+/// codec-d/cool_fox, via cesarzxk's CGBJ fork (BR-41).
+const DEFAULT_STAGING_FLOOR: usize = 256 << 20;
+
+/// Floor for the title's staging request. `TUXBOX_DSTORAGE_STAGING_MB=0` keeps
+/// the title's own value; any other number sets the floor in MiB.
+fn staging_floor() -> usize {
+    static FLOOR: OnceLock<usize> = OnceLock::new();
+    *FLOOR.get_or_init(|| match std::env::var("TUXBOX_DSTORAGE_STAGING_MB") {
+        Ok(text) => text
+            .trim()
+            .parse::<usize>()
+            .map_or(DEFAULT_STAGING_FLOOR, |mb| mb.saturating_mul(1 << 20)),
+        Err(_) => DEFAULT_STAGING_FLOOR,
+    })
+}
+
+/// The staging size the workers get: the title's request raised to the floor.
+fn staging_size(requested: usize, floor: usize) -> usize {
+    requested.max(floor)
+}
+
+/// Report one line to the guest's debug output, prefixed like the other providers.
+fn debug_line(text: &str) {
+    let line = std::ffi::CString::new(format!("TuxBox xcrdapi: {text}\n")).unwrap_or_default();
+    unsafe {
+        windows::Win32::System::Diagnostics::Debug::OutputDebugStringA(
+            windows::core::PCSTR(line.as_ptr().cast()),
+        )
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::staging_size;
+
+    /// The console asks for 32 MiB; a PC read of a multi-MB block would exceed it.
+    #[test]
+    fn the_console_size_is_raised_to_the_floor() {
+        assert_eq!(staging_size(32 << 20, 256 << 20), 256 << 20);
+    }
+
+    #[test]
+    fn a_larger_request_keeps_its_own_size() {
+        assert_eq!(staging_size(512 << 20, 256 << 20), 512 << 20);
+    }
+
+    #[test]
+    fn a_zero_floor_keeps_the_title_value() {
+        assert_eq!(staging_size(32 << 20, 0), 32 << 20);
+    }
+}
 fn storage_stats() -> std::sync::MutexGuard<'static, StorageStats> {
     static STATS: std::sync::LazyLock<Mutex<StorageStats>> =
         std::sync::LazyLock::new(Default::default);

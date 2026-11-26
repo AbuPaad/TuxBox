@@ -52,6 +52,7 @@ mod heap;
 pub(crate) mod indirect;
 pub(crate) mod media;
 pub(crate) mod placement;
+mod pressure;
 pub(crate) mod queries;
 pub(crate) mod ray_build;
 mod ray_compile;

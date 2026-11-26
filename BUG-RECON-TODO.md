@@ -886,6 +886,25 @@ recorded in BR-12 and BR-26, so the number transfers and the mechanism does not.
 3. Treat black-before-gameplay on the Series S profile as a compose-plane symptom before calling it a
    rendering bug.
 
+**Implemented the same evening.**
+
+1. Staging floor, `runtime/xcrdapi/src/lib.rs`. `SetStagingBufferSize` now takes
+   `max(requested, floor)`. The floor is 256 MiB, and `TUXBOX_DSTORAGE_STAGING_MB` overrides it, with 0
+   keeping the title's own value. The effective size is what the read limit checks and what the stats
+   report. A live run logged the expected line:
+   `TuxBox xcrdapi: staging raised from 32 MiB to 256 MiB (TUXBOX_DSTORAGE_STAGING_MB)`.
+2. Commit admission, `runtime/d3d12/src/device/pressure.rs`, wired at
+   `device/placement/upload.rs::record`. It samples free physical and commit memory once a second. It
+   keeps the fork's hysteresis: pressure below 5 GiB physical or 6 GiB commit, cleared above 3 GiB and
+   4 GiB.
+   The gate refuses growth when commit sits under `512 MiB + request`. `TUXBOX_COMMIT_ADMISSION=1` turns
+   the refusal on, and the sample line prints either way.
+
+Neither crate runs its tests on a Linux host. Verification was
+`cargo check --target x86_64-pc-windows-msvc` plus one boot. The log line proves the staging floor. The
+admission gate compiles and is wired, but nothing has exercised it yet. The run still stops before the
+first texture upload, so its line waits for the first `Upload::record`.
+
 Licence: GPL-3.0-or-later trees, Apache-2.0 here. Mechanisms and measurements only, reimplemented, credited.
 
 ---
