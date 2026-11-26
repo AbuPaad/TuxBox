@@ -2,8 +2,10 @@
 import re
 
 MASKS = (
-    # "[buffer_load_dwordx3 @ 0x1a0]" names one variant of the same gap.
-    (re.compile(r"\s*\[[a-z0-9_]+ @ 0x[0-9a-fA-F]+\]"), ""),
+    # "[buffer_load_dwordx3 @ 0x1a0]" names one variant of the same gap. A
+    # bracketed suffix after the counter carries the descriptor, as in
+    # "[buffer_load_dword @ 0x0, descriptor heap s8]".
+    (re.compile(r"\s*\[[a-z0-9_]+ @ 0x[0-9a-fA-F]+[^\]]*\]"), ""),
     (re.compile(r"0x[0-9a-fA-F]+"), "0x_"),
     (re.compile(r"\b([svt])\[?\d+(?::\d+)?\]?"), r"\1N"),
     (re.compile(r"\b\d+\b"), "N"),
@@ -25,7 +27,7 @@ def normalize_refusal(message):
 
 # Retain the instruction named by the emitter before normalization removes
 # location-specific suffixes. Unknown messages remain grouped by reason.
-OPCODE = re.compile(r"\[([a-z][a-z0-9_]+) @ 0x[0-9a-fA-F]+\]")
+OPCODE = re.compile(r"\[([a-z][a-z0-9_]+) @ 0x[0-9a-fA-F]+[^\]]*\]")
 LEADING_OPCODE = re.compile(r"^((?:s|v|buffer|image|ds|flat|global|scratch|tbuffer)_[a-z0-9_]+)\b")
 SAMPLER = re.compile(
     r"not a sampler descriptor .* words \["

@@ -25,6 +25,18 @@ def compiled(n=0):
 
 
 class Worklist(unittest.TestCase):
+    def test_a_descriptor_suffix_keeps_the_reason_and_the_opcode(self):
+        # The emitter now names the descriptor after the counter. The normalised
+        # reason must not change, so counts stay comparable across the change.
+        with_descriptor = refusal_detail(
+            "raw buffer IDXEN needs the console descriptor stride "
+            "[buffer_load_dword @ 0x1a0, descriptor heap s8]")
+        without = refusal_detail(
+            "raw buffer IDXEN needs the console descriptor stride "
+            "[buffer_load_dword @ 0x1a0]")
+        self.assertEqual(with_descriptor["reason"], without["reason"])
+        self.assertEqual(with_descriptor["opcode"], "buffer_load_dword")
+
     def test_log_last_refusal_dedup_and_opcode(self):
         rows, events = log_rows([
             f"Xbox shader {key(0)}: xshader failed (65): previous refusal",

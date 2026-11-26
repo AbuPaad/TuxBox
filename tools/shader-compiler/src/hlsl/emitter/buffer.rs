@@ -67,7 +67,17 @@ impl<'a> Emitter<'a> {
             if (stride.is_none() && !self.raw_byte_index.contains(&ins.offset))
                 || !ins.mnemonic.starts_with("buffer_load_dword")
             {
-                return Err("raw buffer IDXEN needs the console descriptor stride".into());
+                // Name the descriptor the translator tried, so a session log says
+                // which slots this bucket is made of.
+                let origin = match self.res.get(&self.cur_idx).and_then(|v| v.first()).copied() {
+                    Some(Res::HeapRaw(rs)) => format!("descriptor heap s{rs}"),
+                    Some(Res::Raw(slot, _)) => format!("descriptor root slot {slot}"),
+                    _ => "no descriptor".to_string(),
+                };
+                return Err(format!(
+                    "raw buffer IDXEN needs the console descriptor stride [{} @ 0x{:x}, {origin}]",
+                    ins.mnemonic, ins.offset
+                ));
             }
             let mut index = r(&ins.src[0])?;
             if let Some(stride) = stride { index = format!("({index} * {stride})"); }

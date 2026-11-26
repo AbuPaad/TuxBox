@@ -122,12 +122,17 @@ Closes the store bucket of BR-27, 577 refusals.
 
 Closes the `IDXEN` bucket of BR-27, 129 refusals.
 
-- Change: at the `raw buffer IDXEN needs the console descriptor stride` refusal
-  (`tools/shader-compiler/src/hlsl/emitter/buffer.rs:70`), print the slot and descriptor word 1.
-- Keep: the stride field from every refused program.
-- Closes when: the recorded strides can be compared against the V# values. Victory-United reads the
-  same field from the host (`SLOT_TABLE_STRIDES`, BR-28), so a disagreement between our decode and
-  theirs is a finding.
+- Done in this tree on 2026-11-27. The refusal now names the instruction, the program offset and the
+  descriptor it tried: `raw buffer IDXEN needs the console descriptor stride
+  [buffer_load_dword @ 0x1a0, descriptor heap s8]`, or `descriptor root slot 3`, or `no descriptor`.
+- The normalised reason does not change, so the 129 count stays comparable with earlier runs. `tools/`
+  masks the suffix the same way it masked the counter.
+- Keep: those lines for one session.
+- Closes when: the recorded descriptors show what share of the bucket is heap and what share is root.
+  Victory-United reads the same field from the host (`SLOT_TABLE_STRIDES`, BR-28), so a disagreement
+  between our decode and theirs is a finding.
+- Not yet in the line: descriptor word 1. The translator has not read it at that point. Record it if a
+  run shows a slot that should have a stride and does not.
 
 ### LB-20 — What does the large-program set cost to compile?
 

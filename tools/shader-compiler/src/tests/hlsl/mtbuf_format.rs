@@ -115,3 +115,27 @@ fn a_typed_store_is_still_refused() {
         "{error}"
     );
 }
+
+/// `buffer_load_dword` (MUBUF op 12) with IDXEN, through the heap descriptor in s8.
+const MUBUF_LOAD_DWORD_IDXEN: u32 = (0x38 << 26) | (12 << 18) | (2 << 12);
+/// vdata v4, vaddr v0, srsrc s8, soffset the constant zero.
+const MUBUF_SECOND: u32 = 0x8002_0004;
+
+/// A raw indexed load needs the descriptor's stride. When the translator cannot
+/// read that stride, the refusal must name the descriptor it tried, so a log of
+/// one session says which slots the bucket is made of.
+#[test]
+fn raw_indexed_load_refusal_names_the_descriptor() {
+    let words = [
+        0x8f04_8504, // s_lshl_b32 s4, s4, 5
+        0xf408_0205, // s_load_dwordx4 s[8:11], s[10:11], s4
+        0x0800_0000,
+        MUBUF_LOAD_DWORD_IDXEN,
+        MUBUF_SECOND,
+    ];
+    let error = match lower(&words) {
+        Ok(hlsl) => panic!("indexed raw load translated: {hlsl}"),
+        Err(error) => error,
+    };
+    assert!(error.contains("descriptor heap s8"), "{error}");
+}

@@ -626,6 +626,8 @@ Order of work, cheapest first:
    but the crate has no runnable tests on this host, so a run must check the 1,551 drop.
 2. **`IDXEN` stride, 129 requests.** `refused_for_heap_strides` already exists in the same file.
    Action: record the per-slot stride with the request. This also needs no GPU.
+   Partly done on 2026-11-27. The refusal now names the descriptor it tried, which is the line LB-19
+   needs. The stride field itself is not recorded yet.
 3. **Wave reduction in large programs, 1,502 requests.** The limit stays until the generated code
    compiles faster. A trial translated 1,211 of 1,442. Its samples took 2-12 s in DXC, produced
    1-2 MB of DXIL, and driver compiles reached six minutes. Action: cut emitted code size first. The fork
