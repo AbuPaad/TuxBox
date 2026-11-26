@@ -902,8 +902,8 @@ recorded in BR-12 and BR-26, so the number transfers and the mechanism does not.
 
 Neither crate runs its tests on a Linux host. Verification was
 `cargo check --target x86_64-pc-windows-msvc` plus one boot. The log line proves the staging floor. The
-admission gate compiles and is wired, but nothing has exercised it yet. The run still stops before the
-first texture upload, so its line waits for the first `Upload::record`.
+admission gate compiles, and `Upload::record` calls it, but no run has reached that call. The run still
+stops before the first texture upload, so the line waits for it.
 
 Licence: GPL-3.0-or-later trees, Apache-2.0 here. Mechanisms and measurements only, reimplemented, credited.
 
