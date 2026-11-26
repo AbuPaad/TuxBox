@@ -7,6 +7,10 @@ file and line that decide it, and what would close it.
 No entry claims that a bug is reachable in play. The status field says whether someone saw it,
 measured it, or only read it in another project's log.
 
+`LOGBLOCK.md` collects the open questions whose answer is a log line from a real run. Each
+entry there names the `BR-n` item it closes, the switch that produces the line and the text to
+keep. Use it for anything with status `verify`, and for the run half of `open`.
+
 ## Sources
 
 - `DoubleGhosty/cool_fox`. A GPL-3.0 fork of VIctory, with RDNA3 work. Read at `f4b48ad` on
